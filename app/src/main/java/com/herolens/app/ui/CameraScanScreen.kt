@@ -5,12 +5,15 @@ import android.app.Activity
 import android.content.Context
 import android.content.ContextWrapper
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.content.pm.PackageManager
+import android.content.res.Configuration
 import android.net.Uri
 import android.provider.Settings
 import android.util.Size as AndroidSize
 import android.view.MotionEvent
 import android.view.WindowManager
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.camera.core.Camera
@@ -33,6 +36,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -59,6 +63,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -73,6 +78,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
 import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -129,6 +135,8 @@ fun CameraScanScreen(
 ) {
     val context = LocalContext.current
     val activity = context.findActivity()
+    val configuration = LocalConfiguration.current
+    val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
@@ -179,6 +187,11 @@ fun CameraScanScreen(
     var zoomRatio by remember { mutableStateOf(defaultZoom.coerceIn(1f, 5f)) }
     var hapticSent by remember { mutableStateOf(false) }
 
+    fun closeScanner() {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+        onClose()
+    }
+
     fun averageConfidence(): Int {
         val accepted = detections.filter { it.heroId != null }
         if (accepted.isEmpty()) return 0
@@ -203,8 +216,15 @@ fun CameraScanScreen(
             .take(5)
         if (enemies.size == 5 && allies.size >= 4) {
             imported = true
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             onUseDetections(allies, enemies, currentHero, averageConfidence())
         }
+    }
+
+    BackHandler(enabled = true) { closeScanner() }
+
+    LaunchedEffect(activity) {
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
     }
 
     LaunchedEffect(Unit) {
@@ -257,27 +277,34 @@ fun CameraScanScreen(
             cameraProvider?.unbindAll()
             analyzerExecutor.shutdownNow()
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         }
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF080B12)) {
-        Column(Modifier.fillMaxSize()) {
-            Row(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Column(Modifier.weight(1f)) {
-                    Text("LIVE SCAN", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
-                    Text(status, color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodySmall)
+        Column(
+            modifier = Modifier.fillMaxSize(),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            if (!isLandscape) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column(Modifier.weight(1f)) {
+                        Text("LIVE SCAN", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(status, color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodySmall)
+                    }
+                    TextButton(onClick = ::closeScanner) { Text("CLOSE") }
                 }
-                TextButton(onClick = onClose) { Text("CLOSE") }
             }
 
             Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 14.dp)
-                    .aspectRatio(16f / 9f)
+                modifier = (if (isLandscape) {
+                    Modifier.fillMaxHeight().aspectRatio(16f / 9f).padding(6.dp)
+                } else {
+                    Modifier.fillMaxWidth().padding(horizontal = 14.dp).aspectRatio(16f / 9f)
+                })
                     .background(Color.Black, RoundedCornerShape(22.dp))
                     .pointerInput(Unit) {
                         detectTransformGestures { _, _, gestureZoom, _ ->
@@ -293,12 +320,13 @@ fun CameraScanScreen(
                     }
             ) {
                 if (permissionGranted) {
+                    key(configuration.orientation) {
                     AndroidView(
                         modifier = Modifier.fillMaxSize(),
                         factory = { viewContext ->
                             PreviewView(viewContext).also { view ->
                                 view.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                                view.scaleType = PreviewView.ScaleType.FILL_CENTER
+                                view.scaleType = PreviewView.ScaleType.FIT_CENTER
                                 val future = ProcessCameraProvider.getInstance(viewContext)
                                 future.addListener({
                                     runCatching {
@@ -384,10 +412,11 @@ fun CameraScanScreen(
                                                         stableSlots = snapshot.stableSlots
                                                         framesObserved = snapshot.framesObserved
                                                         readyToImport = snapshot.ready
-                                                        status = if (snapshot.ready) {
-                                                            context.getString(R.string.lineup_locked)
-                                                        } else {
-                                                            context.getString(R.string.detecting_live, snapshot.stableSlots)
+                                                        status = when {
+                                                            snapshot.ready -> context.getString(R.string.lineup_locked)
+                                                            snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 ->
+                                                                "Move closer — make the TV scoreboard fill the frame"
+                                                            else -> context.getString(R.string.detecting_live, snapshot.stableSlots)
                                                         }
                                                         if (snapshot.ready) liveEnabled = false
                                                     }
@@ -439,6 +468,7 @@ fun CameraScanScreen(
                             }
                         }
                     )
+                    }
                     if (showDetections) ScoreboardAlignmentOverlay(if (selectedLayout == ScoreboardLayout.AUTO) resolvedLayout else selectedLayout)
                 } else {
                     Column(
@@ -455,9 +485,69 @@ fun CameraScanScreen(
                         }
                     }
                 }
+
+                Surface(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(10.dp)
+                        .clickable { closeScanner() },
+                    color = Color.Black.copy(alpha = 0.78f),
+                    shape = RoundedCornerShape(14.dp),
+                    tonalElevation = 6.dp
+                ) {
+                    Text(
+                        text = "← EXIT SCAN",
+                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                        color = Color.White,
+                        fontWeight = FontWeight.Black
+                    )
+                }
+
+                if (isLandscape) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopCenter)
+                            .padding(top = 10.dp),
+                        color = Color.Black.copy(alpha = 0.68f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Text(
+                            text = "$status · $stableSlots/10",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
+                            color = Color.White,
+                            fontWeight = FontWeight.Bold
+                        )
+                    }
+
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.BottomEnd)
+                            .padding(10.dp),
+                        color = Color.Black.copy(alpha = 0.76f),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        Row(
+                            modifier = Modifier.padding(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            OutlinedButton(onClick = {
+                                liveEnabled = !liveEnabled
+                                if (liveEnabled) warning = null
+                            }) {
+                                Text(if (liveEnabled) stringResource(R.string.pause) else stringResource(R.string.rescan))
+                            }
+                            if (readyToImport) {
+                                Button(onClick = { importStableTeams() }) {
+                                    Text(stringResource(R.string.use_now), fontWeight = FontWeight.Black)
+                                }
+                            }
+                        }
+                    }
+                }
             }
 
-            Column(
+            if (!isLandscape) Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)

@@ -66,9 +66,30 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             )
         }
 
+        return ScoreboardSlots.profiles(layout)
+            .mapIndexed { profileIndex, slots ->
+                detectProfile(
+                    frame = frame,
+                    slots = slots,
+                    templates = templates,
+                    onProgress = { position ->
+                        onProgress("Recognizing profile ${profileIndex + 1} · $position/10")
+                    }
+                )
+            }
+            .maxByOrNull(::resultQuality)
+            ?: DetectionResult(emptyList(), templates.size, listOf("No scoreboard profile matched."))
+    }
+
+    private fun detectProfile(
+        frame: ScoreboardFrame,
+        slots: List<Pair<TeamSide, NormalizedRect>>,
+        templates: Map<String, ImageSignature>,
+        onProgress: (Int) -> Unit
+    ): DetectionResult {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
-        val detections = ScoreboardSlots.slots(layout).mapIndexed { index, (team, rect) ->
-            onProgress("Recognizing ${index + 1}/10")
+        val detections = slots.mapIndexed { index, (team, rect) ->
+            onProgress(index + 1)
             val signatures = ScoreboardSlots.jittered(rect).map { candidateRect ->
                 val crop = SignatureMath.crop(frame, candidateRect)
                 SignatureMath.signature(crop.rgba, crop.width, crop.height)
@@ -86,8 +107,8 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val raw = ((best.second + 1f) / 2f).coerceIn(0f, 1f)
             val margin = (best.second - second).coerceAtLeast(0f)
             val separation = (best.second - third).coerceAtLeast(0f)
-            val confidence = (raw * 0.62f + margin * 0.90f + separation * 0.36f).coerceIn(0f, 0.99f)
-            val accepted = confidence >= 0.44f && margin >= 0.018f
+            val confidence = (raw * 0.60f + margin * 1.05f + separation * 0.42f).coerceIn(0f, 0.99f)
+            val accepted = confidence >= 0.41f && margin >= 0.014f
             if (accepted) used += best.first
             HeroDetection(
                 heroId = best.first.takeIf { accepted },
@@ -99,7 +120,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                 }
             )
         }
-        val lowConfidence = detections.count { it.heroId == null || it.confidence < 0.58f }
+        val lowConfidence = detections.count { it.heroId == null || it.confidence < 0.55f }
         val warnings = buildList {
             if (cachedFailures.isNotEmpty()) add("${cachedFailures.size} portrait templates failed to load.")
             if (lowConfidence > 0) add("$lowConfidence slots are still uncertain.")

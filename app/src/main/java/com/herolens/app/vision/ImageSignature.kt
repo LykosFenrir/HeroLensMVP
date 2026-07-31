@@ -21,41 +21,88 @@ data class ImageSignature(
 )
 
 object ScoreboardSlots {
-    private val allyCenters = floatArrayOf(0.185f, 0.255f, 0.325f, 0.395f, 0.465f)
-    private val enemyCenters = floatArrayOf(0.605f, 0.675f, 0.745f, 0.815f, 0.885f)
+    /*
+     * The first profile is tuned for a phone pointed at a TV/monitor where the
+     * whole Overwatch scoreboard is visible. The fallback profile keeps
+     * compatibility with tighter crops and older UI scaling.
+     */
+    private val tvAllyCenters = floatArrayOf(0.155f, 0.225f, 0.295f, 0.365f, 0.435f)
+    private val tvEnemyCenters = floatArrayOf(0.575f, 0.645f, 0.715f, 0.785f, 0.855f)
+    private val closeAllyCenters = floatArrayOf(0.185f, 0.255f, 0.325f, 0.395f, 0.465f)
+    private val closeEnemyCenters = floatArrayOf(0.605f, 0.675f, 0.745f, 0.815f, 0.885f)
 
-    fun slots(layout: ScoreboardLayout): List<Pair<TeamSide, NormalizedRect>> {
+    fun slots(layout: ScoreboardLayout): List<Pair<TeamSide, NormalizedRect>> =
+        profiles(layout).first()
+
+    fun profiles(layout: ScoreboardLayout): List<List<Pair<TeamSide, NormalizedRect>>> {
         require(layout != ScoreboardLayout.AUTO) { "AUTO layout must be resolved before requesting slots" }
-        val centerX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) 0.155f else 0.845f
-        val halfWidth = 0.032f
-        val halfHeight = 0.050f
-        return buildList {
-            allyCenters.forEach { centerY ->
-                add(TeamSide.ALLY to NormalizedRect(centerX - halfWidth, centerY - halfHeight, centerX + halfWidth, centerY + halfHeight))
-            }
-            enemyCenters.forEach { centerY ->
-                add(TeamSide.ENEMY to NormalizedRect(centerX - halfWidth, centerY - halfHeight, centerX + halfWidth, centerY + halfHeight))
-            }
+        val tvCenterX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) 0.064f else 0.936f
+        val closeCenterX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) 0.155f else 0.845f
+        return listOf(
+            buildProfile(tvCenterX, 0.020f, 0.035f, tvAllyCenters, tvEnemyCenters),
+            buildProfile(closeCenterX, 0.030f, 0.048f, closeAllyCenters, closeEnemyCenters)
+        )
+    }
+
+    private fun buildProfile(
+        centerX: Float,
+        halfWidth: Float,
+        halfHeight: Float,
+        allyCenters: FloatArray,
+        enemyCenters: FloatArray
+    ): List<Pair<TeamSide, NormalizedRect>> = buildList {
+        allyCenters.forEach { centerY ->
+            add(TeamSide.ALLY to rect(centerX, centerY, halfWidth, halfHeight))
+        }
+        enemyCenters.forEach { centerY ->
+            add(TeamSide.ENEMY to rect(centerX, centerY, halfWidth, halfHeight))
         }
     }
 
-    /** Small horizontal/vertical offsets make template matching more tolerant of phone framing. */
+    private fun rect(centerX: Float, centerY: Float, halfWidth: Float, halfHeight: Float) =
+        NormalizedRect(
+            centerX - halfWidth,
+            centerY - halfHeight,
+            centerX + halfWidth,
+            centerY + halfHeight
+        )
+
+    /** Wider offset and scale search tolerates TV bezels, framing, UI scale and slight tilt. */
     fun jittered(rect: NormalizedRect): List<NormalizedRect> {
         val offsets = listOf(
             0f to 0f,
-            -0.006f to 0f,
-            0.006f to 0f,
-            0f to -0.004f,
-            0f to 0.004f
+            -0.012f to 0f,
+            0.012f to 0f,
+            0f to -0.009f,
+            0f to 0.009f,
+            -0.008f to -0.006f,
+            0.008f to -0.006f,
+            -0.008f to 0.006f,
+            0.008f to 0.006f
         )
-        return offsets.map { (dx, dy) ->
-            NormalizedRect(
-                left = (rect.left + dx).coerceIn(0f, 1f),
-                top = (rect.top + dy).coerceIn(0f, 1f),
-                right = (rect.right + dx).coerceIn(0f, 1f),
-                bottom = (rect.bottom + dy).coerceIn(0f, 1f)
-            )
-        }
+        val shifted = offsets.map { (dx, dy) -> shift(rect, dx, dy) }
+        return shifted + resize(rect, 0.86f) + resize(rect, 1.16f)
+    }
+
+    private fun shift(rect: NormalizedRect, dx: Float, dy: Float) =
+        NormalizedRect(
+            left = (rect.left + dx).coerceIn(0f, 1f),
+            top = (rect.top + dy).coerceIn(0f, 1f),
+            right = (rect.right + dx).coerceIn(0f, 1f),
+            bottom = (rect.bottom + dy).coerceIn(0f, 1f)
+        )
+
+    private fun resize(rect: NormalizedRect, scale: Float): NormalizedRect {
+        val cx = (rect.left + rect.right) / 2f
+        val cy = (rect.top + rect.bottom) / 2f
+        val hw = (rect.right - rect.left) * scale / 2f
+        val hh = (rect.bottom - rect.top) * scale / 2f
+        return NormalizedRect(
+            (cx - hw).coerceIn(0f, 1f),
+            (cy - hh).coerceIn(0f, 1f),
+            (cx + hw).coerceIn(0f, 1f),
+            (cy + hh).coerceIn(0f, 1f)
+        )
     }
 }
 
@@ -120,7 +167,7 @@ object SignatureMath {
         val edge = correlation(a.edges, b.edges)
         val color = histogramIntersection(a.colorHistogram, b.colorHistogram)
         val hash = 1f - java.lang.Long.bitCount(a.hash xor b.hash) / 64f
-        return (lum * 0.40f + edge * 0.25f + color * 0.20f + hash * 0.15f).coerceIn(-1f, 1f)
+        return (lum * 0.47f + edge * 0.32f + color * 0.08f + hash * 0.13f).coerceIn(-1f, 1f)
     }
 
     private fun normalize(values: FloatArray): FloatArray {

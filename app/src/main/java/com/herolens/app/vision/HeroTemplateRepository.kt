@@ -76,7 +76,7 @@ class HeroTemplateRepository(private val context: Context) {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.6.1")
         val temporary = File(destination.parentFile, "${destination.name}.part")
         return try {
             connection.inputStream.use { input ->
@@ -97,21 +97,67 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private fun bitmapSignature(bitmap: Bitmap): ImageSignature {
-        val pixels = IntArray(bitmap.width * bitmap.height)
-        bitmap.getPixels(pixels, 0, bitmap.width, 0, 0, bitmap.width, bitmap.height)
-        val rgba = ByteArray(pixels.size * 4)
+        val width = bitmap.width
+        val height = bitmap.height
+        val pixels = IntArray(width * height)
+        bitmap.getPixels(pixels, 0, width, 0, 0, width, height)
+
+        var minX = width
+        var minY = height
+        var maxX = -1
+        var maxY = -1
         pixels.forEachIndexed { index, color ->
-            val offset = index * 4
-            rgba[offset] = ((color shr 16) and 0xff).toByte()
-            rgba[offset + 1] = ((color shr 8) and 0xff).toByte()
-            rgba[offset + 2] = (color and 0xff).toByte()
-            rgba[offset + 3] = ((color ushr 24) and 0xff).toByte()
+            val alpha = (color ushr 24) and 0xff
+            if (alpha >= 24) {
+                val x = index % width
+                val y = index / width
+                if (x < minX) minX = x
+                if (x > maxX) maxX = x
+                if (y < minY) minY = y
+                if (y > maxY) maxY = y
+            }
         }
-        return SignatureMath.signature(rgba, bitmap.width, bitmap.height)
+
+        if (maxX < minX || maxY < minY) {
+            minX = 0
+            minY = 0
+            maxX = width - 1
+            maxY = height - 1
+        }
+
+        val padX = ((maxX - minX + 1) * 0.04f).toInt()
+        val padY = ((maxY - minY + 1) * 0.04f).toInt()
+        minX = (minX - padX).coerceAtLeast(0)
+        minY = (minY - padY).coerceAtLeast(0)
+        maxX = (maxX + padX).coerceAtMost(width - 1)
+        maxY = (maxY + padY).coerceAtMost(height - 1)
+
+        val cropWidth = maxX - minX + 1
+        val cropHeight = maxY - minY + 1
+        val rgba = ByteArray(cropWidth * cropHeight * 4)
+        var destination = 0
+        for (y in minY..maxY) {
+            for (x in minX..maxX) {
+                val color = pixels[y * width + x]
+                val alpha = (color ushr 24) and 0xff
+                val red = (color shr 16) and 0xff
+                val green = (color shr 8) and 0xff
+                val blue = color and 0xff
+
+                // Composite transparent margins onto neutral gray. This makes the
+                // portrait signature less sensitive to the scoreboard's team color.
+                rgba[destination] = ((red * alpha + 128 * (255 - alpha)) / 255).toByte()
+                rgba[destination + 1] = ((green * alpha + 128 * (255 - alpha)) / 255).toByte()
+                rgba[destination + 2] = ((blue * alpha + 128 * (255 - alpha)) / 255).toByte()
+                rgba[destination + 3] = 0xff.toByte()
+                destination += 4
+            }
+        }
+        return SignatureMath.signature(rgba, cropWidth, cropHeight)
     }
 
     private fun signatureCacheFile(): File =
-        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6.bin")
+        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_1-tv.bin")
 
     private fun readSignatureCache(): Map<String, ImageSignature>? {
         val file = signatureCacheFile()
@@ -170,7 +216,7 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6"
+        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_1_TV"
     }
 }
 
