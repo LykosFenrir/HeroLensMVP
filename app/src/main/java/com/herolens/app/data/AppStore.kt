@@ -37,7 +37,7 @@ enum class ScanMode(
         description = "Locks quickly when the phone and scoreboard are already aligned.",
         windowSize = 4,
         minimumVotes = 2,
-        minimumConfidence = 0.47f,
+        minimumConfidence = 0.40f,
         intervalMs = 190L
     ),
     BALANCED(
@@ -45,7 +45,7 @@ enum class ScanMode(
         description = "Recommended mix of speed and protection against one-frame mistakes.",
         windowSize = 5,
         minimumVotes = 3,
-        minimumConfidence = 0.52f,
+        minimumConfidence = 0.45f,
         intervalMs = 270L
     ),
     ACCURATE(
@@ -53,7 +53,7 @@ enum class ScanMode(
         description = "Uses more agreeing frames for glare, distant monitors and difficult angles.",
         windowSize = 7,
         minimumVotes = 4,
-        minimumConfidence = 0.57f,
+        minimumConfidence = 0.50f,
         intervalMs = 330L
     )
 }
@@ -66,6 +66,7 @@ data class ScannerSettings(
     val showDetections: Boolean = true,
     val hapticFeedback: Boolean = true,
     val defaultZoom: Float = 1f,
+    val autoZoom: Boolean = true,
     val scanMode: ScanMode = ScanMode.BALANCED,
     val preferredLayout: ScoreboardLayout = ScoreboardLayout.AUTO,
     val onboardingComplete: Boolean = false
@@ -101,6 +102,7 @@ class AppStore(context: Context) {
         showDetections = preferences.getBoolean(KEY_SHOW_DETECTIONS, true),
         hapticFeedback = preferences.getBoolean(KEY_HAPTICS, true),
         defaultZoom = preferences.getFloat(KEY_ZOOM, 1f).coerceIn(1f, 5f),
+        autoZoom = preferences.getBoolean(KEY_AUTO_ZOOM, true),
         scanMode = enumValue(KEY_SCAN_MODE, ScanMode.BALANCED),
         preferredLayout = enumValue(KEY_LAYOUT, ScoreboardLayout.AUTO),
         onboardingComplete = preferences.getBoolean(KEY_ONBOARDING, false)
@@ -115,6 +117,7 @@ class AppStore(context: Context) {
             .putBoolean(KEY_SHOW_DETECTIONS, settings.showDetections)
             .putBoolean(KEY_HAPTICS, settings.hapticFeedback)
             .putFloat(KEY_ZOOM, settings.defaultZoom)
+            .putBoolean(KEY_AUTO_ZOOM, settings.autoZoom)
             .putString(KEY_SCAN_MODE, settings.scanMode.name)
             .putString(KEY_LAYOUT, settings.preferredLayout.name)
             .putBoolean(KEY_ONBOARDING, settings.onboardingComplete)
@@ -223,6 +226,7 @@ class AppStore(context: Context) {
         const val KEY_SHOW_DETECTIONS = "show_detections"
         const val KEY_HAPTICS = "haptics"
         const val KEY_ZOOM = "zoom"
+        const val KEY_AUTO_ZOOM = "auto_zoom"
         const val KEY_SCAN_MODE = "scan_mode"
         const val KEY_LAYOUT = "layout"
         const val KEY_ONBOARDING = "onboarding_complete"

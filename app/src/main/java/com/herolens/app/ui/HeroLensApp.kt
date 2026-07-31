@@ -172,14 +172,15 @@ fun HeroLensApp() {
             showDetections = settings.showDetections,
             hapticFeedback = settings.hapticFeedback,
             defaultZoom = settings.defaultZoom,
+            autoZoom = settings.autoZoom,
             scanMode = settings.scanMode,
             preferredLayout = settings.preferredLayout,
             onClose = { showScanner = false },
             onUseDetections = { detectedAllies, detectedEnemies, detectedCurrentHero, confidence ->
                 allyIds.clear()
-                allyIds.addAll(detectedAllies.take(4))
+                allyIds.addAll(detectedAllies.take(5))
                 enemyIds.clear()
-                enemyIds.addAll(detectedEnemies.take(5))
+                enemyIds.addAll(detectedEnemies.take(6))
                 currentHeroId = detectedCurrentHero
                 scanConfidence = confidence
                 detectedCurrentHero?.let { heroId ->
@@ -290,12 +291,12 @@ fun HeroLensApp() {
         HeroPickerDialog(
             title = if (target == PickerTarget.ALLY) stringResource(R.string.allies) else stringResource(R.string.enemies),
             selectedIds = if (target == PickerTarget.ALLY) allyIds.toSet() else enemyIds.toSet(),
-            maximum = if (target == PickerTarget.ALLY) 4 else 5,
+            maximum = if (target == PickerTarget.ALLY) 5 else 6,
             onToggle = { heroId ->
                 val list = if (target == PickerTarget.ALLY) allyIds else enemyIds
                 if (heroId in list) {
                     list.remove(heroId)
-                } else if (list.size < if (target == PickerTarget.ALLY) 4 else 5) {
+                } else if (list.size < if (target == PickerTarget.ALLY) 5 else 6) {
                     list.add(heroId)
                 }
             },
@@ -391,7 +392,7 @@ private fun ScanHomeScreen(
             TeamSelectionCard(
                 title = stringResource(R.string.enemies),
                 selectedIds = enemyIds,
-                maximum = 5,
+                maximum = 6,
                 onOpen = { onOpenPicker(PickerTarget.ENEMY) }
             )
         }
@@ -400,7 +401,7 @@ private fun ScanHomeScreen(
             TeamSelectionCard(
                 title = stringResource(R.string.allies),
                 selectedIds = allyIds,
-                maximum = 4,
+                maximum = 5,
                 onOpen = { onOpenPicker(PickerTarget.ALLY) }
             )
         }
@@ -770,7 +771,7 @@ private fun ReasonInsightCard(reason: Reason) {
 private fun TeamPortraitRow(title: String, heroIds: List<String>) {
     Row(verticalAlignment = Alignment.CenterVertically) {
         Text(title, modifier = Modifier.width(78.dp), style = MaterialTheme.typography.labelMedium)
-        heroIds.distinct().take(5).forEach { id ->
+        heroIds.distinct().take(6).forEach { id ->
             HeroCatalog.byId[id]?.let { hero ->
                 HeroPortrait(hero.id, hero.name, Modifier.padding(end = 5.dp).size(38.dp))
             }
@@ -969,6 +970,15 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         }
 
         item {
+            ToggleSetting(
+                title = "Automatic framing",
+                description = "Zoom toward the detected TV scoreboard while keeping manual pinch, +/− and FRAME controls available.",
+                checked = settings.autoZoom,
+                onCheckedChange = { onSettingsChanged(settings.copy(autoZoom = it)) }
+            )
+        }
+
+        item {
             SettingsCard(title = "Default zoom", description = "Start the camera between 1.0× and 5.0×. Pinch zoom remains available during scanning.") {
                 Text("${String.format(Locale.US, "%.1f", settings.defaultZoom)}×", fontWeight = FontWeight.Bold)
                 Slider(
@@ -984,7 +994,7 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
             SettingsCard(title = "Data and model", description = "Versioned components make future patch and model updates replaceable without redesigning the app.") {
                 Text("Hero data: ${HeroCatalog.DATA_VERSION}", fontWeight = FontWeight.Bold)
                 Text("Recommendation weights: V6 Explainable", fontWeight = FontWeight.Bold)
-                Text("Recognition: color + edge ensemble · multi-frame consensus · LiteRT model slot ready", fontWeight = FontWeight.Bold)
+                Text("Recognition: localized TV scoreboard · multi-crop portrait ensemble · multi-frame consensus · LiteRT model slot ready", fontWeight = FontWeight.Bold)
                 Text("OTA endpoint is not configured in this MVP; updates are bundled with source releases.", style = MaterialTheme.typography.bodySmall)
             }
         }

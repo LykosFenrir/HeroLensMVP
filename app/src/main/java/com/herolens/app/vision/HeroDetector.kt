@@ -26,19 +26,40 @@ data class HeroDetection(
     val team: TeamSide,
     val slot: Int,
     val confidence: Float,
-    val alternatives: List<HeroCandidate> = emptyList()
+    val alternatives: List<HeroCandidate> = emptyList(),
+    val bounds: NormalizedRect? = null
 )
+
+data class ScoreboardRegion(
+    val allyPanel: NormalizedRect,
+    val enemyPanel: NormalizedRect,
+    val confidence: Float
+) {
+    val bounds: NormalizedRect
+        get() = NormalizedRect(
+            left = minOf(allyPanel.left, enemyPanel.left),
+            top = minOf(allyPanel.top, enemyPanel.top),
+            right = maxOf(allyPanel.right, enemyPanel.right),
+            bottom = maxOf(allyPanel.bottom, enemyPanel.bottom)
+        )
+}
 
 data class DetectionResult(
     val detections: List<HeroDetection>,
     val templatesLoaded: Int,
-    val warnings: List<String> = emptyList()
+    val warnings: List<String> = emptyList(),
+    val scoreboardRegion: ScoreboardRegion? = null,
+    val slotRects: List<Pair<TeamSide, NormalizedRect>> = emptyList(),
+    val teamSize: Int = 5
 )
 
 data class AutoDetectionResult(
     val result: DetectionResult,
     val layout: ScoreboardLayout,
-    val quality: Float
+    val quality: Float,
+    val scoreboardRegion: ScoreboardRegion? = result.scoreboardRegion,
+    val slotRects: List<Pair<TeamSide, NormalizedRect>> = result.slotRects,
+    val teamSize: Int = result.teamSize
 )
 
 enum class TeamSide { ALLY, ENEMY }

@@ -9,7 +9,12 @@ data class NormalizedRect(
     val top: Float,
     val right: Float,
     val bottom: Float
-)
+) {
+    val width: Float get() = right - left
+    val height: Float get() = bottom - top
+    val centerX: Float get() = (left + right) / 2f
+    val centerY: Float get() = (top + bottom) / 2f
+}
 
 data class CroppedImage(val rgba: ByteArray, val width: Int, val height: Int)
 
@@ -21,11 +26,7 @@ data class ImageSignature(
 )
 
 object ScoreboardSlots {
-    /*
-     * The first profile is tuned for a phone pointed at a TV/monitor where the
-     * whole Overwatch scoreboard is visible. The fallback profile keeps
-     * compatibility with tighter crops and older UI scaling.
-     */
+    /* Legacy full-frame profiles are kept as a fallback when panel localization fails. */
     private val tvAllyCenters = floatArrayOf(0.155f, 0.225f, 0.295f, 0.365f, 0.435f)
     private val tvEnemyCenters = floatArrayOf(0.575f, 0.645f, 0.715f, 0.785f, 0.855f)
     private val closeAllyCenters = floatArrayOf(0.185f, 0.255f, 0.325f, 0.395f, 0.465f)
@@ -39,64 +40,120 @@ object ScoreboardSlots {
         val tvCenterX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) 0.064f else 0.936f
         val closeCenterX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) 0.155f else 0.845f
         return listOf(
-            buildProfile(tvCenterX, 0.020f, 0.035f, tvAllyCenters, tvEnemyCenters),
-            buildProfile(closeCenterX, 0.030f, 0.048f, closeAllyCenters, closeEnemyCenters)
+            buildFixedProfile(tvCenterX, 0.020f, 0.035f, tvAllyCenters, tvEnemyCenters),
+            buildFixedProfile(closeCenterX, 0.030f, 0.048f, closeAllyCenters, closeEnemyCenters)
         )
     }
 
-    private fun buildProfile(
+    /**
+     * Builds candidate slots relative to the actually detected blue/red panels.
+     * Both 5v5 and 6v6 are evaluated because current Overwatch modes can use either.
+     */
+    fun localizedProfiles(
+        region: ScoreboardRegion,
+        layout: ScoreboardLayout,
+        teamSize: Int
+    ): List<List<Pair<TeamSide, NormalizedRect>>> {
+        require(layout != ScoreboardLayout.AUTO)
+        require(teamSize in 5..6)
+        // Three compact profiles are enough after panel localization. Older builds
+        // evaluated 32 full combinations per frame, which was too slow on phones.
+        val portraitOffsets = listOf(0.038f, 0.070f)
+        val widthScales = listOf(0.090f)
+        return buildList {
+            portraitOffsets.forEach { offset ->
+                widthScales.forEach { widthScale ->
+                    add(
+                        buildLocalizedProfile(
+                            allyPanel = region.allyPanel,
+                            enemyPanel = region.enemyPanel,
+                            layout = layout,
+                            teamSize = teamSize,
+                            portraitOffset = offset,
+                            portraitWidthScale = widthScale
+                        )
+                    )
+                }
+            }
+        }
+    }
+
+    private fun buildLocalizedProfile(
+        allyPanel: NormalizedRect,
+        enemyPanel: NormalizedRect,
+        layout: ScoreboardLayout,
+        teamSize: Int,
+        portraitOffset: Float,
+        portraitWidthScale: Float
+    ): List<Pair<TeamSide, NormalizedRect>> = buildList {
+        addAll(panelSlots(TeamSide.ALLY, allyPanel, layout, teamSize, portraitOffset, portraitWidthScale))
+        addAll(panelSlots(TeamSide.ENEMY, enemyPanel, layout, teamSize, portraitOffset, portraitWidthScale))
+    }
+
+    private fun panelSlots(
+        team: TeamSide,
+        panel: NormalizedRect,
+        layout: ScoreboardLayout,
+        teamSize: Int,
+        portraitOffset: Float,
+        portraitWidthScale: Float
+    ): List<Pair<TeamSide, NormalizedRect>> {
+        val rowHeight = panel.height / teamSize
+        val halfHeight = rowHeight * 0.46f
+        val halfWidth = panel.width * portraitWidthScale / 2f
+        val centerX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) {
+            panel.left + panel.width * portraitOffset
+        } else {
+            panel.right - panel.width * portraitOffset
+        }
+        return (0 until teamSize).map { slot ->
+            val centerY = panel.top + rowHeight * (slot + 0.5f)
+            team to NormalizedRect(
+                (centerX - halfWidth).coerceIn(0f, 1f),
+                (centerY - halfHeight).coerceIn(0f, 1f),
+                (centerX + halfWidth).coerceIn(0f, 1f),
+                (centerY + halfHeight).coerceIn(0f, 1f)
+            )
+        }
+    }
+
+    private fun buildFixedProfile(
         centerX: Float,
         halfWidth: Float,
         halfHeight: Float,
         allyCenters: FloatArray,
         enemyCenters: FloatArray
     ): List<Pair<TeamSide, NormalizedRect>> = buildList {
-        allyCenters.forEach { centerY ->
-            add(TeamSide.ALLY to rect(centerX, centerY, halfWidth, halfHeight))
-        }
-        enemyCenters.forEach { centerY ->
-            add(TeamSide.ENEMY to rect(centerX, centerY, halfWidth, halfHeight))
-        }
+        allyCenters.forEach { centerY -> add(TeamSide.ALLY to rect(centerX, centerY, halfWidth, halfHeight)) }
+        enemyCenters.forEach { centerY -> add(TeamSide.ENEMY to rect(centerX, centerY, halfWidth, halfHeight)) }
     }
 
     private fun rect(centerX: Float, centerY: Float, halfWidth: Float, halfHeight: Float) =
-        NormalizedRect(
-            centerX - halfWidth,
-            centerY - halfHeight,
-            centerX + halfWidth,
-            centerY + halfHeight
-        )
+        NormalizedRect(centerX - halfWidth, centerY - halfHeight, centerX + halfWidth, centerY + halfHeight)
 
-    /** Wider offset and scale search tolerates TV bezels, framing, UI scale and slight tilt. */
+    /** Offset and scale search tolerates bezel framing, UI scale and mild perspective. */
     fun jittered(rect: NormalizedRect): List<NormalizedRect> {
         val offsets = listOf(
             0f to 0f,
-            -0.012f to 0f,
-            0.012f to 0f,
-            0f to -0.009f,
-            0f to 0.009f,
-            -0.008f to -0.006f,
-            0.008f to -0.006f,
-            -0.008f to 0.006f,
-            0.008f to 0.006f
+            -0.006f to 0f,
+            0.006f to 0f
         )
         val shifted = offsets.map { (dx, dy) -> shift(rect, dx, dy) }
-        return shifted + resize(rect, 0.86f) + resize(rect, 1.16f)
+        return shifted + resize(rect, 0.88f) + resize(rect, 1.12f)
     }
 
-    private fun shift(rect: NormalizedRect, dx: Float, dy: Float) =
-        NormalizedRect(
-            left = (rect.left + dx).coerceIn(0f, 1f),
-            top = (rect.top + dy).coerceIn(0f, 1f),
-            right = (rect.right + dx).coerceIn(0f, 1f),
-            bottom = (rect.bottom + dy).coerceIn(0f, 1f)
-        )
+    private fun shift(rect: NormalizedRect, dx: Float, dy: Float) = NormalizedRect(
+        (rect.left + dx).coerceIn(0f, 1f),
+        (rect.top + dy).coerceIn(0f, 1f),
+        (rect.right + dx).coerceIn(0f, 1f),
+        (rect.bottom + dy).coerceIn(0f, 1f)
+    )
 
     private fun resize(rect: NormalizedRect, scale: Float): NormalizedRect {
-        val cx = (rect.left + rect.right) / 2f
-        val cy = (rect.top + rect.bottom) / 2f
-        val hw = (rect.right - rect.left) * scale / 2f
-        val hh = (rect.bottom - rect.top) * scale / 2f
+        val cx = rect.centerX
+        val cy = rect.centerY
+        val hw = rect.width * scale / 2f
+        val hh = rect.height * scale / 2f
         return NormalizedRect(
             (cx - hw).coerceIn(0f, 1f),
             (cy - hh).coerceIn(0f, 1f),
@@ -160,6 +217,12 @@ object SignatureMath {
             }
         }
         return ImageSignature(normalized, normalize(edges), histogram, differenceHash(gray))
+    }
+
+    fun quickSimilarity(a: ImageSignature, b: ImageSignature): Float {
+        val color = histogramIntersection(a.colorHistogram, b.colorHistogram)
+        val hash = 1f - java.lang.Long.bitCount(a.hash xor b.hash) / 64f
+        return (hash * 0.72f + color * 0.28f).coerceIn(0f, 1f)
     }
 
     fun similarity(a: ImageSignature, b: ImageSignature): Float {

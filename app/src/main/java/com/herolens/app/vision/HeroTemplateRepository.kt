@@ -44,9 +44,9 @@ class HeroTemplateRepository(private val context: Context) {
                         } else {
                             downloadBitmap(source.getString(heroId), cached)
                         } ?: error("Unable to decode portrait")
-                        val signature = bitmapSignature(bitmap)
+                        val signatures = bitmapSignatures(bitmap)
                         bitmap.recycle()
-                        heroId to signature
+                        heroId to signatures
                     }
                     val count = completed.incrementAndGet()
                     onProgress("Preparing recognition $count/${ids.size}")
@@ -56,10 +56,10 @@ class HeroTemplateRepository(private val context: Context) {
             }.awaitAll()
         }
 
-        val signatures = linkedMapOf<String, ImageSignature>()
+        val signatures = linkedMapOf<String, List<ImageSignature>>()
         val failures = mutableListOf<String>()
         results.forEach { (heroId, result) ->
-            result.onSuccess { (_, signature) -> signatures[heroId] = signature }
+            result.onSuccess { (_, heroSignatures) -> signatures[heroId] = heroSignatures }
                 .onFailure { failures += "$heroId: ${it.message ?: "download failed"}" }
         }
         if (signatures.isNotEmpty()) writeSignatureCache(signatures)
@@ -76,7 +76,7 @@ class HeroTemplateRepository(private val context: Context) {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6.1")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.6.2")
         val temporary = File(destination.parentFile, "${destination.name}.part")
         return try {
             connection.inputStream.use { input ->
@@ -96,7 +96,7 @@ class HeroTemplateRepository(private val context: Context) {
         }
     }
 
-    private fun bitmapSignature(bitmap: Bitmap): ImageSignature {
+    private fun bitmapSignatures(bitmap: Bitmap): List<ImageSignature> {
         val width = bitmap.width
         val height = bitmap.height
         val pixels = IntArray(width * height)
@@ -132,34 +132,49 @@ class HeroTemplateRepository(private val context: Context) {
         maxX = (maxX + padX).coerceAtMost(width - 1)
         maxY = (maxY + padY).coerceAtMost(height - 1)
 
-        val cropWidth = maxX - minX + 1
-        val cropHeight = maxY - minY + 1
-        val rgba = ByteArray(cropWidth * cropHeight * 4)
-        var destination = 0
-        for (y in minY..maxY) {
-            for (x in minX..maxX) {
-                val color = pixels[y * width + x]
-                val alpha = (color ushr 24) and 0xff
-                val red = (color shr 16) and 0xff
-                val green = (color shr 8) and 0xff
-                val blue = color and 0xff
-
-                // Composite transparent margins onto neutral gray. This makes the
-                // portrait signature less sensitive to the scoreboard's team color.
-                rgba[destination] = ((red * alpha + 128 * (255 - alpha)) / 255).toByte()
-                rgba[destination + 1] = ((green * alpha + 128 * (255 - alpha)) / 255).toByte()
-                rgba[destination + 2] = ((blue * alpha + 128 * (255 - alpha)) / 255).toByte()
-                rgba[destination + 3] = 0xff.toByte()
-                destination += 4
+        fun signatureFor(left: Int, top: Int, right: Int, bottom: Int): ImageSignature {
+            val cropWidth = (right - left + 1).coerceAtLeast(1)
+            val cropHeight = (bottom - top + 1).coerceAtLeast(1)
+            val rgba = ByteArray(cropWidth * cropHeight * 4)
+            var destination = 0
+            for (y in top..bottom) {
+                for (x in left..right) {
+                    val color = pixels[y * width + x]
+                    val alpha = (color ushr 24) and 0xff
+                    val red = (color shr 16) and 0xff
+                    val green = (color shr 8) and 0xff
+                    val blue = color and 0xff
+                    rgba[destination] = ((red * alpha + 128 * (255 - alpha)) / 255).toByte()
+                    rgba[destination + 1] = ((green * alpha + 128 * (255 - alpha)) / 255).toByte()
+                    rgba[destination + 2] = ((blue * alpha + 128 * (255 - alpha)) / 255).toByte()
+                    rgba[destination + 3] = 0xff.toByte()
+                    destination += 4
+                }
             }
+            return SignatureMath.signature(rgba, cropWidth, cropHeight)
         }
-        return SignatureMath.signature(rgba, cropWidth, cropHeight)
+
+        val fullWidth = maxX - minX + 1
+        val fullHeight = maxY - minY + 1
+        val squareSize = minOf(fullWidth, fullHeight)
+        val squareLeft = (minX + (fullWidth - squareSize) / 2).coerceIn(minX, maxX)
+        val squareTop = (minY + (fullHeight - squareSize) / 3).coerceIn(minY, maxY)
+        val squareRight = (squareLeft + squareSize - 1).coerceAtMost(maxX)
+        val squareBottom = (squareTop + squareSize - 1).coerceAtMost(maxY)
+        val upperBottom = (minY + fullHeight * 0.84f).toInt().coerceIn(minY, maxY)
+        val insetX = (fullWidth * 0.06f).toInt()
+
+        return listOf(
+            signatureFor(minX, minY, maxX, maxY),
+            signatureFor(squareLeft, squareTop, squareRight, squareBottom),
+            signatureFor((minX + insetX).coerceAtMost(maxX), minY, (maxX - insetX).coerceAtLeast(minX), upperBottom)
+        )
     }
 
     private fun signatureCacheFile(): File =
-        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_1-tv.bin")
+        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_2-multicrop.bin")
 
-    private fun readSignatureCache(): Map<String, ImageSignature>? {
+    private fun readSignatureCache(): Map<String, List<ImageSignature>>? {
         val file = signatureCacheFile()
         if (!file.exists()) return null
         return runCatching {
@@ -169,11 +184,15 @@ class HeroTemplateRepository(private val context: Context) {
                 buildMap {
                     repeat(count) {
                         val heroId = input.readUTF()
-                        val luminance = input.readFloatArray()
-                        val edges = input.readFloatArray()
-                        val histogram = input.readFloatArray()
-                        val hash = input.readLong()
-                        put(heroId, ImageSignature(luminance, edges, histogram, hash))
+                        val variantCount = input.readInt().coerceIn(1, 8)
+                        val variants = List(variantCount) {
+                            val luminance = input.readFloatArray()
+                            val edges = input.readFloatArray()
+                            val histogram = input.readFloatArray()
+                            val hash = input.readLong()
+                            ImageSignature(luminance, edges, histogram, hash)
+                        }
+                        put(heroId, variants)
                     }
                 }
             }
@@ -183,19 +202,22 @@ class HeroTemplateRepository(private val context: Context) {
         }
     }
 
-    private fun writeSignatureCache(signatures: Map<String, ImageSignature>) {
+    private fun writeSignatureCache(signatures: Map<String, List<ImageSignature>>) {
         val destination = signatureCacheFile()
         val temporary = File(destination.parentFile, "${destination.name}.part")
         runCatching {
             DataOutputStream(temporary.outputStream().buffered()).use { output ->
                 output.writeUTF(CACHE_MAGIC)
                 output.writeInt(signatures.size)
-                signatures.toSortedMap().forEach { (heroId, signature) ->
+                signatures.toSortedMap().forEach { (heroId, variants) ->
                     output.writeUTF(heroId)
-                    output.writeFloatArray(signature.luminance)
-                    output.writeFloatArray(signature.edges)
-                    output.writeFloatArray(signature.colorHistogram)
-                    output.writeLong(signature.hash)
+                    output.writeInt(variants.size)
+                    variants.forEach { signature ->
+                        output.writeFloatArray(signature.luminance)
+                        output.writeFloatArray(signature.edges)
+                        output.writeFloatArray(signature.colorHistogram)
+                        output.writeLong(signature.hash)
+                    }
                 }
             }
             if (!temporary.renameTo(destination)) {
@@ -216,11 +238,11 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_1_TV"
+        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_2_MULTICROP"
     }
 }
 
 data class TemplateLoadResult(
-    val signatures: Map<String, ImageSignature>,
+    val signatures: Map<String, List<ImageSignature>>,
     val failures: List<String>
 )

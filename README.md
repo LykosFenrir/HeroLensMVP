@@ -1,8 +1,8 @@
-# HeroLens V6 Coach
+# HeroLens V6.2 Coach
 
 HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a scoreboard with the rear camera, recommend three heroes and explain the enemy counters, ally synergies, map fit, player-comfort impact and switch timing behind every suggestion.
 
-## What V6 adds
+## What V6.2 includes
 
 - Fast, Balanced and Accurate live-scan modes.
 - Automatic or fixed scoreboard portrait-side detection.
@@ -15,7 +15,16 @@ HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a
 - Onboarding, richer scan history and improved mobile layout.
 - Matching V6 browser/PWA prototype.
 
-See `V6_RELEASE_NOTES.md` for the complete list.
+See `V6_RELEASE_NOTES.md` and `V6_2_SCANNER_REBUILD.md` for the complete list.
+
+
+### V6.2 scanner rebuild
+
+- Dynamic blue/red scoreboard localisation instead of fixed overlay coordinates.
+- Automatic camera framing and working PreviewView pinch zoom.
+- Portrait and both landscape rotations while scanning.
+- Dynamic 5v5/6v6 hero slots aligned to the detected TV scoreboard.
+- Faster multi-crop portrait matching and a fresh V6.2 detector cache.
 
 ## Build the Android APK with GitHub Actions
 

@@ -11,7 +11,9 @@ import android.content.res.Configuration
 import android.net.Uri
 import android.provider.Settings
 import android.util.Size as AndroidSize
+import android.view.GestureDetector
 import android.view.MotionEvent
+import android.view.ScaleGestureDetector
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -29,7 +31,6 @@ import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -77,7 +78,6 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
@@ -98,9 +98,11 @@ import com.herolens.app.vision.FrameQualityEvaluator
 import com.herolens.app.vision.HeroCandidate
 import com.herolens.app.vision.HeroDetection
 import com.herolens.app.vision.LiveScanStabilizer
+import com.herolens.app.vision.NormalizedRect
 import com.herolens.app.vision.QualityHint
+import com.herolens.app.vision.ScoreboardRegion
 import com.herolens.app.vision.ScoreboardLayout
-import com.herolens.app.vision.ScoreboardSlots
+import com.herolens.app.vision.ScoreboardLocator
 import com.herolens.app.vision.TeamSide
 import com.herolens.app.vision.TemplateHeroDetector
 import com.herolens.app.vision.toScoreboardFrame
@@ -123,6 +125,7 @@ fun CameraScanScreen(
     showDetections: Boolean,
     hapticFeedback: Boolean,
     defaultZoom: Float,
+    autoZoom: Boolean,
     scanMode: ScanMode,
     preferredLayout: ScoreboardLayout,
     onClose: () -> Unit,
@@ -154,6 +157,8 @@ fun CameraScanScreen(
     val singleScanRequested = remember { AtomicBoolean(false) }
     val lastAnalysisAt = remember { AtomicLong(0L) }
     val cameraRef = remember { AtomicReference<Camera?>(null) }
+    val zoomRatioRef = remember { AtomicReference(defaultZoom.coerceIn(1f, 5f)) }
+    val lastAutoZoomAt = remember { AtomicLong(0L) }
 
     var permissionGranted by remember {
         mutableStateOf(ContextCompat.checkSelfPermission(context, Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED)
@@ -169,7 +174,6 @@ fun CameraScanScreen(
     var warning by remember { mutableStateOf<String?>(null) }
     var fatalError by remember { mutableStateOf<String?>(null) }
     var detections by remember { mutableStateOf<List<HeroDetection>>(emptyList()) }
-    var resolvedLayout by remember { mutableStateOf(ScoreboardLayout.AUTO) }
     var selectedLayout by remember { mutableStateOf(preferredLayout) }
     var frameBrightness by remember { mutableStateOf(0f) }
     var frameSharpness by remember { mutableStateOf(0f) }
@@ -186,10 +190,42 @@ fun CameraScanScreen(
     var ownAllySlot by remember { mutableStateOf<Int?>(null) }
     var zoomRatio by remember { mutableStateOf(defaultZoom.coerceIn(1f, 5f)) }
     var hapticSent by remember { mutableStateOf(false) }
+    var scoreboardRegion by remember { mutableStateOf<ScoreboardRegion?>(null) }
+    var overlaySlots by remember { mutableStateOf<List<Pair<TeamSide, NormalizedRect>>>(emptyList()) }
+    var detectedTeamSize by remember { mutableIntStateOf(5) }
 
     fun closeScanner() {
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
         onClose()
+    }
+
+    fun applyZoom(requested: Float) {
+        val camera = cameraRef.get() ?: return
+        val state = camera.cameraInfo.zoomState.value
+        val target = requested.coerceIn(
+            state?.minZoomRatio ?: 1f,
+            state?.maxZoomRatio ?: 5f
+        )
+        zoomRatioRef.set(target)
+        zoomRatio = target
+        lastAutoZoomAt.set(System.currentTimeMillis())
+        camera.cameraControl.setZoomRatio(target)
+    }
+
+    fun frameScoreboard() {
+        val region = scoreboardRegion
+        if (region == null) {
+            applyZoom(zoomRatioRef.get() + 0.5f)
+            status = "Zooming in — center the scoreboard"
+            return
+        }
+        val bounds = region.bounds
+        val scale = minOf(
+            0.82f / bounds.width.coerceAtLeast(0.01f),
+            0.76f / bounds.height.coerceAtLeast(0.01f)
+        ).coerceIn(0.75f, 2.5f)
+        applyZoom(zoomRatioRef.get() * scale)
+        status = "Scoreboard framed"
     }
 
     fun averageConfidence(): Int {
@@ -208,15 +244,14 @@ fun CameraScanScreen(
             .filterNot { ownAllySlot != null && it.slot == ownAllySlot }
             .mapNotNull { it.heroId }
             .distinct()
-            .take(4)
+            .take((detectedTeamSize - 1).coerceAtLeast(4))
         val enemies = detections.filter { it.team == TeamSide.ENEMY }
             .sortedBy { it.slot }
             .mapNotNull { it.heroId }
             .distinct()
-            .take(5)
-        if (enemies.size == 5 && allies.size >= 4) {
+            .take(detectedTeamSize)
+        if (enemies.size == detectedTeamSize && allies.size >= detectedTeamSize - 1) {
             imported = true
-            activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
             onUseDetections(allies, enemies, currentHero, averageConfidence())
         }
     }
@@ -224,7 +259,9 @@ fun CameraScanScreen(
     BackHandler(enabled = true) { closeScanner() }
 
     LaunchedEffect(activity) {
-        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+        // FULL_SENSOR supports portrait, both landscape directions and returning to
+        // portrait even when the device's normal auto-rotate setting is disabled.
+        activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
     }
 
     LaunchedEffect(Unit) {
@@ -306,18 +343,6 @@ fun CameraScanScreen(
                     Modifier.fillMaxWidth().padding(horizontal = 14.dp).aspectRatio(16f / 9f)
                 })
                     .background(Color.Black, RoundedCornerShape(22.dp))
-                    .pointerInput(Unit) {
-                        detectTransformGestures { _, _, gestureZoom, _ ->
-                            val camera = cameraRef.get() ?: return@detectTransformGestures
-                            val state = camera.cameraInfo.zoomState.value
-                            val next = (zoomRatio * gestureZoom).coerceIn(
-                                state?.minZoomRatio ?: 1f,
-                                state?.maxZoomRatio ?: 5f
-                            )
-                            zoomRatio = next
-                            camera.cameraControl.setZoomRatio(next)
-                        }
-                    }
             ) {
                 if (permissionGranted) {
                     key(configuration.orientation) {
@@ -335,7 +360,7 @@ fun CameraScanScreen(
                                             .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
                                             .setResolutionStrategy(
                                                 ResolutionStrategy(
-                                                    AndroidSize(1280, 720),
+                                                    AndroidSize(960, 540),
                                                     ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
                                                 )
                                             )
@@ -351,6 +376,12 @@ fun CameraScanScreen(
                                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
                                             .build()
+
+                                        view.addOnLayoutChangeListener { changedView, _, _, _, _, _, _, _, _ ->
+                                            val rotation = changedView.display?.rotation ?: return@addOnLayoutChangeListener
+                                            preview.targetRotation = rotation
+                                            analysis.targetRotation = rotation
+                                        }
 
                                         analysis.setAnalyzer(analyzerExecutor) { image ->
                                             val now = System.currentTimeMillis()
@@ -395,8 +426,47 @@ fun CameraScanScreen(
                                                         return@launch
                                                     }
 
+                                                    val locatedRegion = ScoreboardLocator.locate(frame)
+                                                    withContext(Dispatchers.Main) {
+                                                        scoreboardRegion = locatedRegion
+                                                        if (locatedRegion == null) {
+                                                            overlaySlots = emptyList()
+                                                            status = "Aim at the blue and red scoreboard panels"
+                                                        }
+                                                    }
+                                                    if (locatedRegion == null) return@launch
+
+                                                    var zoomChanged = false
+                                                    if (autoZoom && locatedRegion.confidence >= 0.30f && now - lastAutoZoomAt.get() >= 800L) {
+                                                        val bounds = locatedRegion.bounds
+                                                        val widthFraction = bounds.width.coerceAtLeast(0.01f)
+                                                        val heightFraction = bounds.height.coerceAtLeast(0.01f)
+                                                        if (widthFraction < 0.78f || heightFraction < 0.62f) {
+                                                            val camera = cameraRef.get()
+                                                            val zoomState = camera?.cameraInfo?.zoomState?.value
+                                                            val current = zoomRatioRef.get()
+                                                            val scale = minOf(0.82f / widthFraction, 0.76f / heightFraction)
+                                                                .coerceIn(1f, 2.2f)
+                                                            val target = (current * scale * 0.95f).coerceIn(
+                                                                zoomState?.minZoomRatio ?: 1f,
+                                                                zoomState?.maxZoomRatio ?: 5f
+                                                            )
+                                                            if (target > current + 0.12f) {
+                                                                lastAutoZoomAt.set(now)
+                                                                zoomRatioRef.set(target)
+                                                                zoomChanged = true
+                                                                withContext(Dispatchers.Main) {
+                                                                    zoomRatio = target
+                                                                    camera?.cameraControl?.setZoomRatio(target)
+                                                                    status = "Auto-framing scoreboard…"
+                                                                }
+                                                            }
+                                                        }
+                                                    }
+                                                    if (zoomChanged) return@launch
+
                                                     val automatic = if (selectedLayout == ScoreboardLayout.AUTO) {
-                                                        detector.detectAuto(frame)
+                                                        detector.detectAuto(frame, locatedRegion = locatedRegion)
                                                     } else {
                                                         val result = detector.detect(frame, selectedLayout)
                                                         AutoDetectionResult(
@@ -408,10 +478,12 @@ fun CameraScanScreen(
                                                     val snapshot = stabilizer.add(automatic)
                                                     withContext(Dispatchers.Main) {
                                                         detections = snapshot.detections
-                                                        resolvedLayout = snapshot.layout
                                                         stableSlots = snapshot.stableSlots
                                                         framesObserved = snapshot.framesObserved
                                                         readyToImport = snapshot.ready
+                                                        scoreboardRegion = snapshot.scoreboardRegion
+                                                        overlaySlots = snapshot.slotRects
+                                                        detectedTeamSize = snapshot.teamSize
                                                         status = when {
                                                             snapshot.ready -> context.getString(R.string.lineup_locked)
                                                             snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 ->
@@ -444,6 +516,7 @@ fun CameraScanScreen(
                                             zoomState?.minZoomRatio ?: 1f,
                                             zoomState?.maxZoomRatio ?: 5f
                                         )
+                                        zoomRatioRef.set(zoomRatio)
                                         camera.cameraControl.setZoomRatio(zoomRatio)
                                         val exposureState = camera.cameraInfo.exposureState
                                         exposureMin = exposureState.exposureCompensationRange.lower
@@ -451,14 +524,43 @@ fun CameraScanScreen(
                                         exposureIndex = exposureState.exposureCompensationIndex
                                         torchOn = camera.cameraInfo.torchState.value == 1
 
-                                        view.setOnTouchListener { _, event ->
-                                            if (event.action == MotionEvent.ACTION_UP) {
-                                                val point = view.meteringPointFactory.createPoint(event.x, event.y)
-                                                val action = FocusMeteringAction.Builder(point)
-                                                    .setAutoCancelDuration(3, TimeUnit.SECONDS)
-                                                    .build()
-                                                cameraRef.get()?.cameraControl?.startFocusAndMetering(action)
+                                        val scaleDetector = ScaleGestureDetector(
+                                            viewContext,
+                                            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                                                override fun onScale(detector: ScaleGestureDetector): Boolean {
+                                                    val activeCamera = cameraRef.get() ?: return false
+                                                    val state = activeCamera.cameraInfo.zoomState.value
+                                                    val next = (zoomRatioRef.get() * detector.scaleFactor).coerceIn(
+                                                        state?.minZoomRatio ?: 1f,
+                                                        state?.maxZoomRatio ?: 5f
+                                                    )
+                                                    zoomRatioRef.set(next)
+                                                    zoomRatio = next
+                                                    activeCamera.cameraControl.setZoomRatio(next)
+                                                    lastAutoZoomAt.set(System.currentTimeMillis())
+                                                    return true
+                                                }
                                             }
+                                        )
+                                        val tapDetector = GestureDetector(
+                                            viewContext,
+                                            object : GestureDetector.SimpleOnGestureListener() {
+                                                override fun onDown(event: MotionEvent): Boolean = true
+
+                                                override fun onSingleTapConfirmed(event: MotionEvent): Boolean {
+                                                    val point = view.meteringPointFactory.createPoint(event.x, event.y)
+                                                    val action = FocusMeteringAction.Builder(point)
+                                                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                                        .build()
+                                                    cameraRef.get()?.cameraControl?.startFocusAndMetering(action)
+                                                    status = context.getString(R.string.tap_to_focus_hint)
+                                                    return true
+                                                }
+                                            }
+                                        )
+                                        view.setOnTouchListener { _, event ->
+                                            scaleDetector.onTouchEvent(event)
+                                            tapDetector.onTouchEvent(event)
                                             true
                                         }
                                     }.onFailure {
@@ -469,7 +571,7 @@ fun CameraScanScreen(
                         }
                     )
                     }
-                    if (showDetections) ScoreboardAlignmentOverlay(if (selectedLayout == ScoreboardLayout.AUTO) resolvedLayout else selectedLayout)
+                    if (showDetections) DynamicScoreboardOverlay(scoreboardRegion, overlaySlots)
                 } else {
                     Column(
                         modifier = Modifier.align(Alignment.Center).padding(20.dp),
@@ -512,7 +614,7 @@ fun CameraScanScreen(
                         shape = RoundedCornerShape(14.dp)
                     ) {
                         Text(
-                            text = "$status · $stableSlots/10",
+                            text = "$status · $stableSlots/${detectedTeamSize * 2}",
                             modifier = Modifier.padding(horizontal = 14.dp, vertical = 8.dp),
                             color = Color.White,
                             fontWeight = FontWeight.Bold
@@ -531,6 +633,14 @@ fun CameraScanScreen(
                             horizontalArrangement = Arrangement.spacedBy(8.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
+                            OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() - 0.35f) }) { Text("−") }
+                            Text(
+                                "${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×",
+                                color = Color.White,
+                                fontWeight = FontWeight.Black
+                            )
+                            OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() + 0.35f) }) { Text("+") }
+                            OutlinedButton(onClick = { frameScoreboard() }) { Text("FRAME") }
                             OutlinedButton(onClick = {
                                 liveEnabled = !liveEnabled
                                 if (liveEnabled) warning = null
@@ -556,11 +666,11 @@ fun CameraScanScreen(
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 LinearProgressIndicator(
-                    progress = { stableSlots / 10f },
+                    progress = { stableSlots / (detectedTeamSize * 2f) },
                     modifier = Modifier.fillMaxWidth()
                 )
                 Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("$stableSlots/10 stable · $framesObserved frames", color = Color.White.copy(alpha = 0.72f), modifier = Modifier.weight(1f))
+                    Text("$stableSlots/${detectedTeamSize * 2} stable · $framesObserved frames", color = Color.White.copy(alpha = 0.72f), modifier = Modifier.weight(1f))
                     Text("${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×", color = Color.White, fontWeight = FontWeight.Bold)
                 }
                 Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
@@ -583,18 +693,9 @@ fun CameraScanScreen(
                 )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = {
-                        val camera = cameraRef.get() ?: return@OutlinedButton
-                        val state = camera.cameraInfo.zoomState.value
-                        zoomRatio = (zoomRatio - 0.25f).coerceAtLeast(state?.minZoomRatio ?: 1f)
-                        camera.cameraControl.setZoomRatio(zoomRatio)
-                    }) { Text("−") }
-                    OutlinedButton(onClick = {
-                        val camera = cameraRef.get() ?: return@OutlinedButton
-                        val state = camera.cameraInfo.zoomState.value
-                        zoomRatio = (zoomRatio + 0.25f).coerceAtMost(state?.maxZoomRatio ?: 5f)
-                        camera.cameraControl.setZoomRatio(zoomRatio)
-                    }) { Text("+") }
+                    OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() - 0.35f) }) { Text("−") }
+                    OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() + 0.35f) }) { Text("+") }
+                    OutlinedButton(onClick = { frameScoreboard() }) { Text("FRAME") }
 
                     if (!autoScan) {
                         Button(onClick = {
@@ -668,7 +769,7 @@ fun CameraScanScreen(
                     Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                         Text(stringResource(R.string.my_row_optional), color = Color.White, style = MaterialTheme.typography.labelMedium)
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            (0..4).forEach { slot ->
+                            (0 until detectedTeamSize).forEach { slot ->
                                 FilterChip(
                                     selected = ownAllySlot == slot,
                                     onClick = { ownAllySlot = if (ownAllySlot == slot) null else slot },
@@ -706,8 +807,8 @@ fun CameraScanScreen(
                     if (itemIndex == index) detection.copy(heroId = heroId, confidence = 1f) else detection
                 }
                 correctionIndex = null
-                readyToImport = detections.count { it.team == TeamSide.ENEMY && it.heroId != null } == 5 &&
-                    detections.count { it.team == TeamSide.ALLY && it.heroId != null } >= 4
+                readyToImport = detections.count { it.team == TeamSide.ENEMY && it.heroId != null } == detectedTeamSize &&
+                    detections.count { it.team == TeamSide.ALLY && it.heroId != null } >= detectedTeamSize - 1
             },
             onDismiss = { correctionIndex = null }
         )
@@ -715,23 +816,46 @@ fun CameraScanScreen(
 }
 
 @Composable
-private fun ScoreboardAlignmentOverlay(layout: ScoreboardLayout) {
+private fun DynamicScoreboardOverlay(
+    region: ScoreboardRegion?,
+    slots: List<Pair<TeamSide, NormalizedRect>>
+) {
     Canvas(Modifier.fillMaxSize()) {
-        val layouts = if (layout == ScoreboardLayout.AUTO) {
-            listOf(ScoreboardLayout.PORTRAITS_LEFT, ScoreboardLayout.PORTRAITS_RIGHT)
-        } else listOf(layout)
-        layouts.forEach { activeLayout ->
-            val alpha = if (layout == ScoreboardLayout.AUTO) 0.45f else 0.95f
-            val stroke = Stroke(width = 2.dp.toPx())
-            ScoreboardSlots.slots(activeLayout).forEach { (team, rect) ->
-                val base = if (team == TeamSide.ALLY) Color(0xFF67E8F9) else Color(0xFFFB7185)
-                drawRect(
-                    color = base.copy(alpha = alpha),
-                    topLeft = Offset(rect.left * size.width, rect.top * size.height),
-                    size = Size((rect.right - rect.left) * size.width, (rect.bottom - rect.top) * size.height),
-                    style = stroke
-                )
-            }
+        val stroke = Stroke(width = 2.dp.toPx())
+        if (region == null) {
+            // A single framing guide is less misleading than fixed hero boxes. The
+            // actual boxes appear only after the scoreboard panels are localized.
+            val guideWidth = size.width * 0.72f
+            val guideHeight = size.height * 0.68f
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.55f),
+                topLeft = Offset((size.width - guideWidth) / 2f, (size.height - guideHeight) / 2f),
+                size = Size(guideWidth, guideHeight),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(18.dp.toPx()),
+                style = Stroke(width = 2.dp.toPx())
+            )
+            return@Canvas
+        }
+
+        listOf(TeamSide.ALLY to region.allyPanel, TeamSide.ENEMY to region.enemyPanel).forEach { (team, rect) ->
+            val color = if (team == TeamSide.ALLY) Color(0xFF22D3EE) else Color(0xFFFB7185)
+            drawRoundRect(
+                color = color.copy(alpha = 0.72f),
+                topLeft = Offset(rect.left * size.width, rect.top * size.height),
+                size = Size(rect.width * size.width, rect.height * size.height),
+                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
+                style = Stroke(width = 2.dp.toPx())
+            )
+        }
+
+        slots.forEach { (team, rect) ->
+            val color = if (team == TeamSide.ALLY) Color(0xFF67E8F9) else Color(0xFFFB7185)
+            drawRect(
+                color = color,
+                topLeft = Offset(rect.left * size.width, rect.top * size.height),
+                size = Size(rect.width * size.width, rect.height * size.height),
+                style = stroke
+            )
         }
     }
 }
@@ -849,7 +973,7 @@ private fun SingleHeroPickerDialog(
 private fun detectionQuality(result: DetectionResult): Float {
     val accepted = result.detections.filter { it.heroId != null }
     if (accepted.isEmpty()) return 0f
-    val coverage = accepted.size / 10f
+    val coverage = accepted.size / (result.teamSize * 2f)
     val confidence = accepted.map { it.confidence }.average().toFloat()
     return coverage * 0.58f + confidence * 0.42f
 }

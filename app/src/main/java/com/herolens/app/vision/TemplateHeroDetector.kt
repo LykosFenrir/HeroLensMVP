@@ -3,13 +3,13 @@ package com.herolens.app.vision
 import android.content.Context
 
 /**
- * Experimental detector that compares aligned scoreboard slots with cached hero portraits.
- * Live scanning adds blur rejection and multi-frame consensus around this detector.
- * A trained LiteRT classifier can replace it without changing the camera UI contract.
+ * Experimental on-device detector. V6.2 first locates the actual blue/red scoreboard
+ * panels, then compares only the portrait cells. This is substantially more robust
+ * than fixed screen coordinates and supports both 5v5 and 6v6 scoreboards.
  */
 class TemplateHeroDetector(context: Context) : HeroDetector {
     private val repository = HeroTemplateRepository(context.applicationContext)
-    @Volatile private var cachedTemplates: Map<String, ImageSignature>? = null
+    @Volatile private var cachedTemplates: Map<String, List<ImageSignature>>? = null
     @Volatile private var cachedFailures: List<String> = emptyList()
 
     suspend fun warmUp(onProgress: (String) -> Unit = {}): Int {
@@ -19,18 +19,51 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
 
     suspend fun detectAuto(
         frame: ScoreboardFrame,
-        onProgress: (String) -> Unit = {}
+        onProgress: (String) -> Unit = {},
+        locatedRegion: ScoreboardRegion? = null
     ): AutoDetectionResult {
         ensureTemplates(onProgress)
-        val left = detectWithTemplates(frame, ScoreboardLayout.PORTRAITS_LEFT, onProgress)
-        val right = detectWithTemplates(frame, ScoreboardLayout.PORTRAITS_RIGHT, onProgress)
-        val leftQuality = resultQuality(left)
-        val rightQuality = resultQuality(right)
-        return if (rightQuality > leftQuality) {
-            AutoDetectionResult(right, ScoreboardLayout.PORTRAITS_RIGHT, rightQuality)
-        } else {
-            AutoDetectionResult(left, ScoreboardLayout.PORTRAITS_LEFT, leftQuality)
+        val region = locatedRegion ?: ScoreboardLocator.locate(frame)
+        if (region == null) {
+            val placeholders = placeholderDetections(teamSize = 5)
+            val result = DetectionResult(
+                detections = placeholders,
+                templatesLoaded = cachedTemplates.orEmpty().size,
+                warnings = listOf("Scoreboard panels not found. Center the blue and red team tables in the frame."),
+                teamSize = 5
+            )
+            return AutoDetectionResult(result, ScoreboardLayout.PORTRAITS_LEFT, 0f)
         }
+
+        val leftCandidates = listOf(5, 6).map { teamSize ->
+            detectLocalized(frame, region, ScoreboardLayout.PORTRAITS_LEFT, teamSize, onProgress)
+        }
+        val bestLeft = leftCandidates.maxByOrNull(::resultQuality)
+        val best = if (bestLeft != null && resultQuality(bestLeft) >= 0.34f &&
+            bestLeft.detections.count { it.heroId != null } >= 3
+        ) {
+            bestLeft
+        } else {
+            val rightCandidates = listOf(5, 6).map { teamSize ->
+                detectLocalized(frame, region, ScoreboardLayout.PORTRAITS_RIGHT, teamSize, onProgress)
+            }
+            (leftCandidates + rightCandidates).maxByOrNull(::resultQuality)
+                ?: DetectionResult(placeholderDetections(5), cachedTemplates.orEmpty().size, teamSize = 5)
+        }
+        val layout = if (best.slotRects.firstOrNull()?.second?.centerX?.let { it < region.bounds.centerX } == true) {
+            ScoreboardLayout.PORTRAITS_LEFT
+        } else {
+            ScoreboardLayout.PORTRAITS_RIGHT
+        }
+        val quality = (resultQuality(best) * 0.86f + region.confidence * 0.14f).coerceIn(0f, 1f)
+        return AutoDetectionResult(
+            result = best,
+            layout = layout,
+            quality = quality,
+            scoreboardRegion = region,
+            slotRects = best.slotRects,
+            teamSize = best.teamSize
+        )
     }
 
     override suspend fun detect(
@@ -39,9 +72,15 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         onProgress: (String) -> Unit
     ): DetectionResult {
         ensureTemplates(onProgress)
-        return when (layout) {
-            ScoreboardLayout.AUTO -> detectAuto(frame, onProgress).result
-            else -> detectWithTemplates(frame, layout, onProgress)
+        if (layout == ScoreboardLayout.AUTO) return detectAuto(frame, onProgress).result
+        val region = ScoreboardLocator.locate(frame)
+        return if (region != null) {
+            listOf(5, 6)
+                .map { teamSize -> detectLocalized(frame, region, layout, teamSize, onProgress) }
+                .maxByOrNull(::resultQuality)
+                ?: DetectionResult(placeholderDetections(5), cachedTemplates.orEmpty().size, teamSize = 5)
+        } else {
+            detectLegacy(frame, layout, onProgress)
         }
     }
 
@@ -52,39 +91,57 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         cachedFailures = loadResult.failures
     }
 
-    private fun detectWithTemplates(
+    private fun detectLocalized(
+        frame: ScoreboardFrame,
+        region: ScoreboardRegion,
+        layout: ScoreboardLayout,
+        teamSize: Int,
+        onProgress: (String) -> Unit
+    ): DetectionResult {
+        val templates = cachedTemplates.orEmpty()
+        if (templates.isEmpty()) return noTemplates(teamSize, region)
+        val profiles = ScoreboardSlots.localizedProfiles(region, layout, teamSize)
+        return profiles.mapIndexed { profileIndex, slots ->
+            detectProfile(
+                frame = frame,
+                slots = slots,
+                templates = templates,
+                teamSize = teamSize,
+                region = region,
+                onProgress = { position ->
+                    onProgress("Recognizing ${teamSize}v${teamSize} · ${profileIndex + 1}/${profiles.size} · $position/${teamSize * 2}")
+                }
+            )
+        }.maxByOrNull(::resultQuality)
+            ?: DetectionResult(placeholderDetections(teamSize), templates.size, scoreboardRegion = region, teamSize = teamSize)
+    }
+
+    private fun detectLegacy(
         frame: ScoreboardFrame,
         layout: ScoreboardLayout,
         onProgress: (String) -> Unit
     ): DetectionResult {
         val templates = cachedTemplates.orEmpty()
-        if (templates.isEmpty()) {
-            return DetectionResult(
-                detections = emptyList(),
-                templatesLoaded = 0,
-                warnings = listOf("Hero portraits could not be loaded. Check the internet connection and try again.")
+        if (templates.isEmpty()) return noTemplates(5, null)
+        return ScoreboardSlots.profiles(layout).mapIndexed { profileIndex, slots ->
+            detectProfile(
+                frame = frame,
+                slots = slots,
+                templates = templates,
+                teamSize = 5,
+                region = null,
+                onProgress = { position -> onProgress("Fallback profile ${profileIndex + 1} · $position/10") }
             )
-        }
-
-        return ScoreboardSlots.profiles(layout)
-            .mapIndexed { profileIndex, slots ->
-                detectProfile(
-                    frame = frame,
-                    slots = slots,
-                    templates = templates,
-                    onProgress = { position ->
-                        onProgress("Recognizing profile ${profileIndex + 1} · $position/10")
-                    }
-                )
-            }
-            .maxByOrNull(::resultQuality)
-            ?: DetectionResult(emptyList(), templates.size, listOf("No scoreboard profile matched."))
+        }.maxByOrNull(::resultQuality)
+            ?: DetectionResult(placeholderDetections(5), templates.size, teamSize = 5)
     }
 
     private fun detectProfile(
         frame: ScoreboardFrame,
         slots: List<Pair<TeamSide, NormalizedRect>>,
-        templates: Map<String, ImageSignature>,
+        templates: Map<String, List<ImageSignature>>,
+        teamSize: Int,
+        region: ScoreboardRegion?,
         onProgress: (Int) -> Unit
     ): DetectionResult {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
@@ -95,11 +152,33 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                 SignatureMath.signature(crop.rgba, crop.width, crop.height)
             }
             val used = usedByTeam.getOrPut(team) { mutableSetOf() }
-            val ranked = templates.entries
-                .map { (heroId, template) ->
-                    heroId to signatures.maxOf { signature -> SignatureMath.similarity(signature, template) }
+            // Cheap hash/histogram pass first, then expensive luminance/edge
+            // correlation only for the strongest candidates. This keeps live scanning
+            // responsive on mid-range phones.
+            val shortlist = templates.entries
+                .map { (heroId, templateVariants) ->
+                    heroId to signatures.maxOf { cameraSignature ->
+                        templateVariants.maxOf { template ->
+                            SignatureMath.quickSimilarity(cameraSignature, template)
+                        }
+                    }
                 }
                 .sortedByDescending { it.second }
+                .take(12)
+                .map { it.first }
+                .toSet()
+            val ranked = templates.entries
+                .asSequence()
+                .filter { it.key in shortlist }
+                .map { (heroId, templateVariants) ->
+                    heroId to signatures.maxOf { cameraSignature ->
+                        templateVariants.maxOf { template ->
+                            SignatureMath.similarity(cameraSignature, template)
+                        }
+                    }
+                }
+                .sortedByDescending { it.second }
+                .toList()
             val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
             val best = available.first()
             val second = available.getOrNull(1)?.second ?: -1f
@@ -107,17 +186,18 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val raw = ((best.second + 1f) / 2f).coerceIn(0f, 1f)
             val margin = (best.second - second).coerceAtLeast(0f)
             val separation = (best.second - third).coerceAtLeast(0f)
-            val confidence = (raw * 0.60f + margin * 1.05f + separation * 0.42f).coerceIn(0f, 0.99f)
-            val accepted = confidence >= 0.41f && margin >= 0.014f
+            val confidence = (raw * 0.64f + margin * 1.18f + separation * 0.36f).coerceIn(0f, 0.99f)
+            val accepted = confidence >= 0.34f && raw >= 0.46f && margin >= 0.004f
             if (accepted) used += best.first
             HeroDetection(
                 heroId = best.first.takeIf { accepted },
                 team = team,
-                slot = index % 5,
+                slot = index % teamSize,
                 confidence = confidence,
                 alternatives = available.take(3).map { (heroId, score) ->
                     HeroCandidate(heroId, ((score + 1f) / 2f).coerceIn(0f, 1f))
-                }
+                },
+                bounds = rect
             )
         }
         val lowConfidence = detections.count { it.heroId == null || it.confidence < 0.55f }
@@ -125,14 +205,38 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             if (cachedFailures.isNotEmpty()) add("${cachedFailures.size} portrait templates failed to load.")
             if (lowConfidence > 0) add("$lowConfidence slots are still uncertain.")
         }
-        return DetectionResult(detections, templates.size, warnings)
+        return DetectionResult(
+            detections = detections,
+            templatesLoaded = templates.size,
+            warnings = warnings,
+            scoreboardRegion = region,
+            slotRects = slots,
+            teamSize = teamSize
+        )
+    }
+
+    private fun noTemplates(teamSize: Int, region: ScoreboardRegion?): DetectionResult = DetectionResult(
+        detections = placeholderDetections(teamSize),
+        templatesLoaded = 0,
+        warnings = listOf("Hero portraits could not be loaded. Check the internet connection and try again."),
+        scoreboardRegion = region,
+        teamSize = teamSize
+    )
+
+    private fun placeholderDetections(teamSize: Int): List<HeroDetection> = buildList {
+        repeat(teamSize) { slot -> add(HeroDetection(null, TeamSide.ALLY, slot, 0f)) }
+        repeat(teamSize) { slot -> add(HeroDetection(null, TeamSide.ENEMY, slot, 0f)) }
     }
 
     private fun resultQuality(result: DetectionResult): Float {
         if (result.detections.isEmpty()) return 0f
         val accepted = result.detections.filter { it.heroId != null }
-        val coverage = accepted.size / 10f
+        val total = (result.teamSize * 2).coerceAtLeast(1)
+        val coverage = accepted.size / total.toFloat()
         val confidence = if (accepted.isEmpty()) 0f else accepted.map { it.confidence }.average().toFloat()
-        return coverage * 0.58f + confidence * 0.42f
+        val uniqueness = accepted.groupBy { it.team }.values
+            .map { team -> team.mapNotNull { it.heroId }.distinct().size / maxOf(1f, team.size.toFloat()) }
+            .average().toFloat().takeIf { !it.isNaN() } ?: 0f
+        return (coverage * 0.56f + confidence * 0.36f + uniqueness * 0.08f).coerceIn(0f, 1f)
     }
 }
