@@ -3,8 +3,8 @@
 
 The default job creates 20 independently augmented samples per hero (1,040 hero
 samples for the 52-hero catalog) plus an unknown/background class. It also checks
-the trained classifier against 600 generated full 5v5 scoreboard scenes (6,000
-portrait cells) before publishing. It downloads only the portrait URLs already
+the trained classifier against a mixed set of generated 5v5 and 6v6 scoreboard
+scenes before publishing. It downloads only the portrait URLs already
 listed in app/src/main/assets/hero_portraits.json. Real, user-reviewed crops can
 be added under training/real_samples/<hero-id>/.
 
@@ -222,6 +222,25 @@ def render_scoreboard_icon(base: Image.Image, width: int, height: int, seed: int
         radius = max(3, int(min(width, height) * rng.uniform(0.22, 0.42)))
         cx, cy = rng.randint(0, max(0, width - 1)), rng.randint(0, max(0, height - 1))
         draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=(255, 255, 255, rng.randint(20, 90)), width=1)
+    # Console/Open Queue layouts can place a large progression badge over the
+    # lower portrait. The Android scanner now also tries an upper-core crop, but
+    # training on the obstruction prevents confident false hero matches.
+    if rng.random() < 0.58:
+        radius = max(4, int(min(width, height) * rng.uniform(0.24, 0.38)))
+        cx = int(width * rng.uniform(0.42, 0.60))
+        cy = int(height * rng.uniform(0.58, 0.76))
+        draw.ellipse(
+            (cx - radius, cy - radius, cx + radius, cy + radius),
+            fill=(28, 33, 52, rng.randint(105, 185)),
+            outline=(245, 248, 255, rng.randint(120, 230)),
+            width=max(1, int(radius * 0.14)),
+        )
+        inner = max(1, int(radius * 0.62))
+        draw.ellipse(
+            (cx - inner, cy - inner, cx + inner, cy + inner),
+            outline=(255, 90, 175, rng.randint(80, 200)),
+            width=max(1, int(radius * 0.10)),
+        )
     return canvas.convert("RGB")
 
 
@@ -274,6 +293,7 @@ def make_scoreboard_scene(
     portraits: dict[str, Image.Image],
     hero_ids: list[str],
     seed: int,
+    team_size: int = 5,
 ) -> tuple[Image.Image, list[tuple[tuple[int, int, int, int], str]]]:
     """Build one full 16:9 scoreboard scene and return its known portrait boxes.
 
@@ -292,7 +312,8 @@ def make_scoreboard_scene(
 
     panel_width = rng.randint(470, 650)
     row_height = rng.randint(33, 43)
-    panel_height = row_height * 5 + rng.randint(3, 11)
+    team_size = 6 if team_size == 6 else 5
+    panel_height = row_height * team_size + rng.randint(3, 11)
     left = rng.randint(70, max(71, width - panel_width - 55))
     top = rng.randint(45, 95)
     gap = rng.randint(30, 60)
@@ -302,7 +323,8 @@ def make_scoreboard_scene(
         red_top = height - panel_height - 20
         blue_top = red_top - panel_height - gap
 
-    chosen = rng.sample(hero_ids, 10) if len(hero_ids) >= 10 else [rng.choice(hero_ids) for _ in range(10)]
+    total_players = team_size * 2
+    chosen = rng.sample(hero_ids, total_players) if len(hero_ids) >= total_players else [rng.choice(hero_ids) for _ in range(total_players)]
     boxes: list[tuple[tuple[int, int, int, int], str]] = []
     portrait_width = int(row_height * rng.uniform(0.82, 1.05))
     role_gutter = rng.randint(8, 20)
@@ -318,12 +340,12 @@ def make_scoreboard_scene(
             outline=(255, 255, 255, rng.randint(30, 110)),
             width=2,
         )
-        for slot in range(5):
+        for slot in range(team_size):
             row_top = panel_top + slot * row_height + 2
             row_bottom = min(panel_top + panel_height - 1, row_top + row_height - 2)
             row_alpha = 190 if slot % 2 else 225
             draw.rectangle((left, row_top, left + panel_width, row_bottom), fill=(*colors[0][:3], row_alpha))
-            hero_id = chosen[team_index * 5 + slot]
+            hero_id = chosen[team_index * team_size + slot]
             cell_left = left + role_gutter
             cell_top = row_top
             cell_right = cell_left + portrait_width
@@ -356,12 +378,14 @@ def make_scoreboard_scene(
 class ScoreboardBenchmarkDataset(Dataset):
     """Known crops from generated full scoreboards, evaluated only after training."""
 
-    def __init__(self, portraits: dict[str, Image.Image], labels: list[str], scenes: int, seed: int):
+    def __init__(self, portraits: dict[str, Image.Image], labels: list[str], scenes: int, seed: int, team_size: int):
         self.portraits = portraits
         self.labels = labels
         self.hero_ids = labels[1:]
         self.scenes = max(1, scenes)
-        self.seed = seed + 30_000_000
+        self.team_size = 6 if team_size == 6 else 5
+        self.slots_per_scene = self.team_size * 2
+        self.seed = seed + 30_000_000 + self.team_size * 1_000_000
         self.by_label = {label: index for index, label in enumerate(labels)}
         self._cached_scene_index: int | None = None
         self._cached_scene: tuple[Image.Image, list[tuple[tuple[int, int, int, int], str]]] | None = None
@@ -372,14 +396,19 @@ class ScoreboardBenchmarkDataset(Dataset):
         ])
 
     def __len__(self) -> int:
-        return self.scenes * 10
+        return self.scenes * self.slots_per_scene
 
     def __getitem__(self, index: int):
-        scene_index = index // 10
-        slot = index % 10
+        scene_index = index // self.slots_per_scene
+        slot = index % self.slots_per_scene
         if self._cached_scene_index != scene_index or self._cached_scene is None:
             self._cached_scene_index = scene_index
-            self._cached_scene = make_scoreboard_scene(self.portraits, self.hero_ids, self.seed + scene_index * 100_019)
+            self._cached_scene = make_scoreboard_scene(
+                self.portraits,
+                self.hero_ids,
+                self.seed + scene_index * 100_019,
+                team_size=self.team_size,
+            )
         image, boxes = self._cached_scene
         (left, top, right, bottom), hero_id = boxes[slot]
         rng = random.Random(self.seed + scene_index * 1_003 + slot)
@@ -556,8 +585,16 @@ def main() -> None:
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, persistent_workers=True)
     valid_loader = DataLoader(valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True)
     scoreboard_valid_loader = DataLoader(scoreboard_valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True)
-    scoreboard_benchmark = ScoreboardBenchmarkDataset(portraits, labels, args.benchmark_scoreboards, args.seed)
-    scoreboard_loader = DataLoader(scoreboard_benchmark, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    benchmark_5v5_scenes = max(1, args.benchmark_scoreboards // 2)
+    benchmark_6v6_scenes = max(1, args.benchmark_scoreboards - benchmark_5v5_scenes)
+    scoreboard_benchmark_5v5 = ScoreboardBenchmarkDataset(
+        portraits, labels, benchmark_5v5_scenes, args.seed, team_size=5
+    )
+    scoreboard_benchmark_6v6 = ScoreboardBenchmarkDataset(
+        portraits, labels, benchmark_6v6_scenes, args.seed, team_size=6
+    )
+    scoreboard_loader_5v5 = DataLoader(scoreboard_benchmark_5v5, batch_size=args.batch_size, shuffle=False, num_workers=0)
+    scoreboard_loader_6v6 = DataLoader(scoreboard_benchmark_6v6, batch_size=args.batch_size, shuffle=False, num_workers=0)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     weights = MobileNet_V3_Small_Weights.DEFAULT
@@ -613,10 +650,22 @@ def main() -> None:
     if best_state is not None:
         model.load_state_dict(best_state)
     model = model.cpu().eval()
-    scoreboard_accuracy, scoreboard_loss = evaluate(model, scoreboard_loader, torch.device("cpu"))
+    scoreboard_5v5_accuracy, scoreboard_5v5_loss = evaluate(model, scoreboard_loader_5v5, torch.device("cpu"))
+    scoreboard_6v6_accuracy, scoreboard_6v6_loss = evaluate(model, scoreboard_loader_6v6, torch.device("cpu"))
+    total_crops = len(scoreboard_benchmark_5v5) + len(scoreboard_benchmark_6v6)
+    scoreboard_accuracy = (
+        scoreboard_5v5_accuracy * len(scoreboard_benchmark_5v5) +
+        scoreboard_6v6_accuracy * len(scoreboard_benchmark_6v6)
+    ) / max(1, total_crops)
+    scoreboard_loss = (
+        scoreboard_5v5_loss * len(scoreboard_benchmark_5v5) +
+        scoreboard_6v6_loss * len(scoreboard_benchmark_6v6)
+    ) / max(1, total_crops)
     print(
-        f"full_scoreboard_benchmark scenes={args.benchmark_scoreboards} "
-        f"crops={len(scoreboard_benchmark)} loss={scoreboard_loss:.4f} accuracy={scoreboard_accuracy:.4f}"
+        f"full_scoreboard_benchmark 5v5_scenes={benchmark_5v5_scenes} "
+        f"5v5_accuracy={scoreboard_5v5_accuracy:.4f} 6v6_scenes={benchmark_6v6_scenes} "
+        f"6v6_accuracy={scoreboard_6v6_accuracy:.4f} crops={total_crops} "
+        f"combined_loss={scoreboard_loss:.4f} combined_accuracy={scoreboard_accuracy:.4f}"
     )
 
     MODEL_DIR.mkdir(parents=True, exist_ok=True)
@@ -647,7 +696,11 @@ def main() -> None:
         "best_scoreboard_crop_validation_accuracy": round(best_scoreboard_crop_accuracy, 6),
         "best_model_selection_score": round(best_selection_score, 6),
         "scoreboard_benchmark_scenes": args.benchmark_scoreboards,
-        "scoreboard_benchmark_crops": len(scoreboard_benchmark),
+        "scoreboard_benchmark_5v5_scenes": benchmark_5v5_scenes,
+        "scoreboard_benchmark_6v6_scenes": benchmark_6v6_scenes,
+        "scoreboard_benchmark_crops": total_crops,
+        "scoreboard_benchmark_5v5_accuracy": round(scoreboard_5v5_accuracy, 6),
+        "scoreboard_benchmark_6v6_accuracy": round(scoreboard_6v6_accuracy, 6),
         "scoreboard_benchmark_accuracy": round(scoreboard_accuracy, 6),
         "input_shape": ["N", 3, INPUT_SIZE, INPUT_SIZE],
         "elapsed_seconds": round(time.time() - started, 2),
@@ -659,7 +712,11 @@ def main() -> None:
         if best_accuracy < 0.72:
             raise SystemExit("Validation accuracy below 72%; refusing to publish model")
         if scoreboard_accuracy < 0.62:
-            raise SystemExit("Full-scoreboard synthetic benchmark below 62%; refusing to publish model")
+            raise SystemExit("Combined full-scoreboard synthetic benchmark below 62%; refusing to publish model")
+        if scoreboard_5v5_accuracy < 0.58:
+            raise SystemExit("5v5 scoreboard benchmark below 58%; refusing to publish model")
+        if scoreboard_6v6_accuracy < 0.58:
+            raise SystemExit("6v6/Open Queue scoreboard benchmark below 58%; refusing to publish model")
 
 
 if __name__ == "__main__":

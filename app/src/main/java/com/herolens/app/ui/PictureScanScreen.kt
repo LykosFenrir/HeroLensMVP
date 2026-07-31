@@ -83,6 +83,7 @@ fun PictureScanScreen(
     collectTrainingData: Boolean,
     inputPlatform: InputPlatform,
     displayType: DisplayType,
+    preferredTeamSize: Int?,
     onClose: () -> Unit,
     onUseDetections: (allies: List<String>, enemies: List<String>, currentHeroId: String?, confidence: Int) -> Unit
 ) {
@@ -118,7 +119,7 @@ fun PictureScanScreen(
             status = "Preparing ${HeroCatalog.heroes.size} hero references…"
             detector.warmUp { progress -> status = progress }
             status = "Recognizing heroes…"
-            val result = withContext(Dispatchers.Default) { detector.detectAuto(loaded, locatedRegion = located) }
+            val result = withContext(Dispatchers.Default) { detector.detectAuto(loaded, locatedRegion = located, preferredTeamSize = preferredTeamSize) }
             layout = result.layout
             teamSize = result.teamSize
             detections = result.result.detections

@@ -2,6 +2,13 @@
 
 HeroLens is an unofficial Android-first Overwatch hero-pick coach. It combines scoreboard recognition with explainable recommendations based on enemy counters, ally synergy, map fit, rank, platform, personal hero comfort and switching cost.
 
+## V8.2 Open Queue support
+
+V8.2 adds structural 5v5/6v6 row detection, a manual **6v6 / Open Queue** override,
+console progression-badge crop handling, multi-crop neural consensus and a first-use
+Picture Scan permission fix. The training publish gate now evaluates both 5v5 and
+6v6 generated scoreboards. See `V8_2_OPEN_QUEUE_FIX.md`.
+
 ## Three scanner modes
 
 ### 1. Auto Scan — fastest
@@ -24,7 +31,7 @@ The repository does not include fabricated pretrained weights. Run the included 
 
 - 1,040 independently augmented hero portrait samples;
 - 220 unknown/background samples;
-- a separate publish-gate benchmark of 600 generated full 5v5 scoreboards containing 6,000 known portrait cells;
+- a separate publish-gate benchmark of 600 generated mixed 5v5/6v6 scoreboards with separately reported accuracy;
 - optional real reviewed crops from `training/real_samples/<hero-id>/`.
 
 These generated scenes simulate TV/laptop scaling, team colors, role gutters, blur, brightness, tint, moiré/scanlines, JPEG compression and partial portrait crops. They are a reproducible synthetic baseline, not a claim that 600 independent real screenshots were scraped from social media.

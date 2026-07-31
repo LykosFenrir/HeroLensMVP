@@ -83,6 +83,7 @@ import com.herolens.app.data.RankTier
 import com.herolens.app.data.ScanHistoryEntry
 import com.herolens.app.data.ScanMode
 import com.herolens.app.data.ScannerSettings
+import com.herolens.app.data.TeamFormat
 import com.herolens.app.vision.ScoreboardLayout
 import java.io.File
 import java.text.SimpleDateFormat
@@ -130,13 +131,25 @@ fun HeroLensApp() {
         if (saved) pictureUri = pendingCaptureUri
         pendingCaptureUri = null
     }
-
-    fun takeScoreboardPicture() {
+    val launchPictureCapture = {
         val directory = File(context.cacheDir, "picture_scan").apply { mkdirs() }
         val file = File(directory, "scoreboard_${System.currentTimeMillis()}.jpg")
         val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
         pendingCaptureUri = uri
         takePictureLauncher.launch(uri)
+    }
+    val pictureCameraPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) launchPictureCapture() else pendingCaptureUri = null
+    }
+
+    fun takeScoreboardPicture() {
+        if (context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED) {
+            launchPictureCapture()
+        } else {
+            pictureCameraPermissionLauncher.launch(Manifest.permission.CAMERA)
+        }
     }
 
     LaunchedEffect(settings) { store.saveSettings(settings) }
@@ -226,6 +239,7 @@ fun HeroLensApp() {
             autoZoom = settings.autoZoom,
             scanMode = settings.scanMode,
             preferredLayout = settings.preferredLayout,
+            preferredTeamSize = settings.teamFormat.teamSize,
             collectTrainingData = settings.collectTrainingData,
             inputPlatform = settings.inputPlatform,
             displayType = settings.displayType,
@@ -241,6 +255,7 @@ fun HeroLensApp() {
             collectTrainingData = settings.collectTrainingData,
             inputPlatform = settings.inputPlatform,
             displayType = settings.displayType,
+            preferredTeamSize = settings.teamFormat.teamSize,
             onClose = { pictureUri = null },
             onUseDetections = ::applyDetectedResults
         )
@@ -1007,6 +1022,23 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
                             selected = settings.displayType == type,
                             onClick = { onSettingsChanged(settings.copy(displayType = type)) },
                             label = { Text(type.label) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SettingsCard(
+                title = "Scoreboard team size",
+                description = "Auto detects normal 5v5 and 6v6 Open Queue. Select 6v6 when console row detection is uncertain or a waiting-for-player row is present."
+            ) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(TeamFormat.entries) { format ->
+                        FilterChip(
+                            selected = settings.teamFormat == format,
+                            onClick = { onSettingsChanged(settings.copy(teamFormat = format)) },
+                            label = { Text(format.label) }
                         )
                     }
                 }

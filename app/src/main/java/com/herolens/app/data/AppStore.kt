@@ -30,6 +30,12 @@ enum class DisplayType(val label: String) {
     LAPTOP("Laptop / monitor")
 }
 
+enum class TeamFormat(val label: String, val teamSize: Int?) {
+    AUTO("Auto", null),
+    FIVE_V_FIVE("5v5", 5),
+    SIX_V_SIX("6v6 / Open Queue", 6)
+}
+
 enum class ScanMode(
     val label: String,
     val description: String,
@@ -80,6 +86,7 @@ data class ScannerSettings(
     val autoZoom: Boolean = true,
     val scanMode: ScanMode = ScanMode.BALANCED,
     val preferredLayout: ScoreboardLayout = ScoreboardLayout.AUTO,
+    val teamFormat: TeamFormat = TeamFormat.AUTO,
     val collectTrainingData: Boolean = false,
     val onboardingComplete: Boolean = false
 )
@@ -120,6 +127,7 @@ class AppStore(context: Context) {
         autoZoom = preferences.getBoolean(KEY_AUTO_ZOOM, true),
         scanMode = enumValue(KEY_SCAN_MODE, ScanMode.BALANCED),
         preferredLayout = enumValue(KEY_LAYOUT, ScoreboardLayout.AUTO),
+        teamFormat = enumValue(KEY_TEAM_FORMAT, TeamFormat.AUTO),
         collectTrainingData = preferences.getBoolean(KEY_COLLECT_TRAINING_DATA, false),
         onboardingComplete = preferences.getBoolean(KEY_ONBOARDING, false)
     )
@@ -127,7 +135,7 @@ class AppStore(context: Context) {
 
     fun saveSettings(settings: ScannerSettings) {
         preferences.edit()
-            .putInt(KEY_SETTINGS_SCHEMA, 7)
+            .putInt(KEY_SETTINGS_SCHEMA, 8)
             .putString(KEY_RANK, settings.rank.name)
             .putString(KEY_INPUT_PLATFORM, settings.inputPlatform.name)
             .putString(KEY_DISPLAY_TYPE, settings.displayType.name)
@@ -139,6 +147,7 @@ class AppStore(context: Context) {
             .putBoolean(KEY_AUTO_ZOOM, settings.autoZoom)
             .putString(KEY_SCAN_MODE, settings.scanMode.name)
             .putString(KEY_LAYOUT, settings.preferredLayout.name)
+            .putString(KEY_TEAM_FORMAT, settings.teamFormat.name)
             .putBoolean(KEY_COLLECT_TRAINING_DATA, settings.collectTrainingData)
             .putBoolean(KEY_ONBOARDING, settings.onboardingComplete)
             .apply()
@@ -251,6 +260,7 @@ class AppStore(context: Context) {
         const val KEY_AUTO_ZOOM = "auto_zoom"
         const val KEY_SCAN_MODE = "scan_mode"
         const val KEY_LAYOUT = "layout"
+        const val KEY_TEAM_FORMAT = "team_format"
         const val KEY_ONBOARDING = "onboarding_complete"
         const val KEY_COLLECT_TRAINING_DATA = "collect_training_data"
         const val KEY_ROLE = "role"

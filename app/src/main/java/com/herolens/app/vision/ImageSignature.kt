@@ -191,13 +191,43 @@ object ScoreboardSlots {
             0f to 0f,
             -0.006f to 0f,
             0.006f to 0f,
+            0f to -0.004f,
             -0.012f to 0f,
             0.012f to 0f,
-            0f to -0.004f,
             0f to 0.004f
         )
         val shifted = offsets.map { (dx, dy) -> shift(rect, dx, dy) }
         return shifted + resize(rect, 0.88f) + resize(rect, 1.12f)
+    }
+
+    /**
+     * Neural crops prioritize the actual face artwork. Console 6v6 scoreboards can
+     * draw a large progression/level badge over the lower half of the portrait;
+     * an upper-core crop prevents that badge from becoming the strongest feature.
+     */
+    fun neuralVariants(rect: NormalizedRect): List<NormalizedRect> = listOf(
+        rect,
+        shift(rect, -0.006f, 0f),
+        shift(rect, 0.006f, 0f),
+        upperCore(rect, horizontalInset = 0.04f, bottomTrim = 0.16f),
+        upperCore(rect, horizontalInset = 0.09f, bottomTrim = 0.22f),
+        resize(shift(rect, 0f, -0.004f), 0.88f),
+        resize(rect, 1.08f)
+    ).distinct()
+
+    private fun upperCore(
+        rect: NormalizedRect,
+        horizontalInset: Float,
+        bottomTrim: Float
+    ): NormalizedRect {
+        val inset = rect.width * horizontalInset.coerceIn(0f, 0.20f)
+        val trimmedBottom = rect.bottom - rect.height * bottomTrim.coerceIn(0f, 0.35f)
+        return NormalizedRect(
+            (rect.left + inset).coerceIn(0f, 1f),
+            rect.top.coerceIn(0f, 1f),
+            (rect.right - inset).coerceIn(0f, 1f),
+            trimmedBottom.coerceIn(rect.top + 0.001f, 1f)
+        )
     }
 
     private fun shift(rect: NormalizedRect, dx: Float, dy: Float) = NormalizedRect(

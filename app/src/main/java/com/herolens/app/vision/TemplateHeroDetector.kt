@@ -29,44 +29,77 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
     suspend fun detectAuto(
         frame: ScoreboardFrame,
         onProgress: (String) -> Unit = {},
-        locatedRegion: ScoreboardRegion? = null
+        locatedRegion: ScoreboardRegion? = null,
+        preferredTeamSize: Int? = null
     ): AutoDetectionResult {
         ensureTemplates(onProgress)
         val region = locatedRegion ?: ScoreboardLocator.locate(frame)
+        val forcedTeamSize = preferredTeamSize?.takeIf { it in 5..6 }
         if (region == null) {
-            val placeholders = placeholderDetections(teamSize = 5)
+            val fallbackSize = forcedTeamSize ?: 5
+            val placeholders = placeholderDetections(teamSize = fallbackSize)
             val result = DetectionResult(
                 detections = placeholders,
                 templatesLoaded = cachedTemplates.orEmpty().size,
                 warnings = listOf("Scoreboard panels not found. Center the blue and red team tables in the frame."),
-                teamSize = 5
+                teamSize = fallbackSize
             )
             return AutoDetectionResult(result, ScoreboardLayout.PORTRAITS_LEFT, 0f)
         }
 
-        val leftCandidates = listOf(5, 6).map { teamSize ->
+        val structural = ScoreboardTeamSizeEstimator.estimate(frame, region)
+        val candidateSizes = when {
+            forcedTeamSize != null -> listOf(forcedTeamSize)
+            structural.teamSize == 6 -> listOf(6, 5)
+            structural.teamSize == 5 -> listOf(5, 6)
+            else -> listOf(5, 6)
+        }
+        fun adjustedQuality(result: DetectionResult): Float {
+            val structuralScore = if (result.teamSize == 6) structural.sixScore else structural.fiveScore
+            val structuralBonus = structuralScore * 0.18f
+            val selectedBonus = when {
+                forcedTeamSize == result.teamSize -> 0.24f
+                structural.teamSize == result.teamSize -> 0.10f * structural.confidence
+                else -> 0f
+            }
+            return (resultQuality(result) * 0.82f + structuralBonus + selectedBonus).coerceIn(0f, 1.25f)
+        }
+
+        val leftCandidates = candidateSizes.map { teamSize ->
             detectLocalized(frame, region, ScoreboardLayout.PORTRAITS_LEFT, teamSize, onProgress)
         }
-        val bestLeft = leftCandidates.maxByOrNull(::resultQuality)
-        val best = if (bestLeft != null && resultQuality(bestLeft) >= 0.34f &&
+        val bestLeft = leftCandidates.maxByOrNull(::adjustedQuality)
+        val best = if (bestLeft != null && adjustedQuality(bestLeft) >= 0.34f &&
             bestLeft.detections.count { it.heroId != null } >= 3
         ) {
             bestLeft
         } else {
-            val rightCandidates = listOf(5, 6).map { teamSize ->
+            val rightCandidates = candidateSizes.map { teamSize ->
                 detectLocalized(frame, region, ScoreboardLayout.PORTRAITS_RIGHT, teamSize, onProgress)
             }
-            (leftCandidates + rightCandidates).maxByOrNull(::resultQuality)
-                ?: DetectionResult(placeholderDetections(5), cachedTemplates.orEmpty().size, teamSize = 5)
+            (leftCandidates + rightCandidates).maxByOrNull(::adjustedQuality)
+                ?: DetectionResult(
+                    placeholderDetections(forcedTeamSize ?: structural.teamSize ?: 5),
+                    cachedTemplates.orEmpty().size,
+                    teamSize = forcedTeamSize ?: structural.teamSize ?: 5
+                )
         }
         val layout = if (best.slotRects.firstOrNull()?.second?.centerX?.let { it < region.bounds.centerX } == true) {
             ScoreboardLayout.PORTRAITS_LEFT
         } else {
             ScoreboardLayout.PORTRAITS_RIGHT
         }
-        val quality = (resultQuality(best) * 0.86f + region.confidence * 0.14f).coerceIn(0f, 1f)
+        val structuralMessage = when {
+            forcedTeamSize == 6 -> "6v6 / Open Queue mode selected."
+            forcedTeamSize == 5 -> "5v5 mode selected."
+            structural.teamSize == 6 -> "Six scoreboard rows detected."
+            structural.teamSize == 5 -> "Five scoreboard rows detected."
+            else -> "Team size inferred from hero crops."
+        }
+        val enriched = best.copy(warnings = best.warnings + structuralMessage)
+        val quality = (adjustedQuality(best) * 0.86f + region.confidence * 0.14f).coerceIn(0f, 1f)
         return AutoDetectionResult(
-            result = best,
+            result = enriched,
             layout = layout,
             quality = quality,
             scoreboardRegion = region,
@@ -97,18 +130,28 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         frame: ScoreboardFrame,
         region: ScoreboardRegion,
         layout: ScoreboardLayout,
-        onProgress: (String) -> Unit = {}
+        onProgress: (String) -> Unit = {},
+        preferredTeamSize: Int? = null
     ): DetectionResult {
         ensureTemplates(onProgress)
-        if (layout == ScoreboardLayout.AUTO) return detectAuto(frame, onProgress, region).result
-        return listOf(5, 6)
+        if (layout == ScoreboardLayout.AUTO) {
+            return detectAuto(frame, onProgress, region, preferredTeamSize).result
+        }
+        val structural = ScoreboardTeamSizeEstimator.estimate(frame, region)
+        val candidateSizes = preferredTeamSize?.takeIf { it in 5..6 }?.let { listOf(it) }
+            ?: structural.teamSize?.let { listOf(it, if (it == 5) 6 else 5) }
+            ?: listOf(5, 6)
+        return candidateSizes
             .map { teamSize -> detectLocalized(frame, region, layout, teamSize, onProgress) }
-            .maxByOrNull(::resultQuality)
+            .maxByOrNull { result ->
+                val structuralScore = if (result.teamSize == 6) structural.sixScore else structural.fiveScore
+                resultQuality(result) * 0.84f + structuralScore * 0.16f
+            }
             ?: DetectionResult(
-                detections = placeholderDetections(5),
+                detections = placeholderDetections(preferredTeamSize ?: structural.teamSize ?: 5),
                 templatesLoaded = cachedTemplates.orEmpty().size,
                 scoreboardRegion = region,
-                teamSize = 5
+                teamSize = preferredTeamSize ?: structural.teamSize ?: 5
             )
     }
 
@@ -188,7 +231,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
         val detections = if (aiClassifier.isAvailable) {
             val cropGroups = slots.map { (_, rect) ->
-                ScoreboardSlots.jittered(rect).take(5).map { candidateRect ->
+                ScoreboardSlots.neuralVariants(rect).map { candidateRect ->
                     SignatureMath.crop(frame, candidateRect)
                 }
             }
@@ -201,26 +244,37 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                 val slotPredictions = predictions
                     .subList(predictionOffset, (predictionOffset + cropCount).coerceAtMost(predictions.size))
                 predictionOffset += cropCount
-                val scores = mutableMapOf<String, Float>()
-                slotPredictions.flatten().forEach { candidate ->
-                    scores[candidate.heroId] = maxOf(scores[candidate.heroId] ?: 0f, candidate.confidence)
+                val evidence = mutableMapOf<String, MutableList<Float>>()
+                slotPredictions.forEach { cropPredictions ->
+                    cropPredictions.forEach { candidate ->
+                        evidence.getOrPut(candidate.heroId) { mutableListOf() } += candidate.confidence
+                    }
                 }
-                val ranked = scores.entries.sortedByDescending { it.value }.map { it.key to it.value }
+                val ranked = evidence.map { (heroId, values) ->
+                    val ordered = values.sortedDescending()
+                    val top = ordered.getOrElse(0) { 0f }
+                    val secondVote = ordered.getOrElse(1) { 0f }
+                    val thirdVote = ordered.getOrElse(2) { 0f }
+                    val mean = values.average().toFloat()
+                    val consensus = top * 0.62f + secondVote * 0.25f + thirdVote * 0.08f + mean * 0.05f
+                    AggregatedCandidate(heroId, consensus, top, values.count { it >= 0.20f })
+                }.sortedByDescending(AggregatedCandidate::score)
                 val used = usedByTeam.getOrPut(team) { mutableSetOf() }
-                val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
+                val available = ranked.filterNot { it.heroId in used }.ifEmpty { ranked }
                 val best = available.firstOrNull()
-                val second = available.getOrNull(1)?.second ?: 0f
-                val bestScore = best?.second ?: 0f
+                val second = available.getOrNull(1)?.score ?: 0f
+                val bestScore = best?.score ?: 0f
                 val margin = (bestScore - second).coerceAtLeast(0f)
-                val confidence = (bestScore * 0.84f + (margin / 0.28f).coerceIn(0f, 1f) * 0.16f).coerceIn(0f, 0.99f)
-                val accepted = best != null && bestScore >= 0.42f && margin >= 0.045f
-                if (accepted) used += best!!.first
+                val confidence = (bestScore * 0.82f + (margin / 0.24f).coerceIn(0f, 1f) * 0.18f).coerceIn(0f, 0.99f)
+                val hasCropConsensus = best != null && (best.votes >= 2 || best.peak >= 0.72f)
+                val accepted = best != null && hasCropConsensus && bestScore >= 0.37f && margin >= 0.030f
+                if (accepted) used += best!!.heroId
                 HeroDetection(
-                    heroId = best?.first?.takeIf { accepted },
+                    heroId = best?.heroId?.takeIf { accepted },
                     team = team,
                     slot = index % teamSize,
                     confidence = confidence,
-                    alternatives = available.take(3).map { (heroId, score) -> HeroCandidate(heroId, score) },
+                    alternatives = available.take(3).map { candidate -> HeroCandidate(candidate.heroId, candidate.score) },
                     bounds = rect
                 )
             }
@@ -306,6 +360,13 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         )
     }
 
+    private data class AggregatedCandidate(
+        val heroId: String,
+        val score: Float,
+        val peak: Float,
+        val votes: Int
+    )
+
     private data class RankedProfile(
         val slots: List<Pair<TeamSide, NormalizedRect>>,
         val score: Float
@@ -367,10 +428,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val uniqueness = accepted.groupBy { it.team }.values
             .map { team -> team.mapNotNull { it.heroId }.distinct().size / maxOf(1f, team.size.toFloat()) }
             .average().toFloat().takeIf { !it.isNaN() } ?: 0f
-        var quality = coverage * 0.45f + confidence * 0.31f + uniqueness * 0.07f + result.profileScore * 0.17f
-        // Overwatch 2's normal scoreboard is 5v5. Do not switch to 6v6 merely
-        // because an extra row division happens to create weak random matches.
-        if (result.teamSize == 6 && accepted.size < 10) quality -= 0.075f
+        val quality = coverage * 0.45f + confidence * 0.31f + uniqueness * 0.07f + result.profileScore * 0.17f
         return quality.coerceIn(0f, 1f)
     }
 }

@@ -146,6 +146,7 @@ fun CameraScanScreen(
     autoZoom: Boolean,
     scanMode: ScanMode,
     preferredLayout: ScoreboardLayout,
+    preferredTeamSize: Int?,
     collectTrainingData: Boolean,
     inputPlatform: InputPlatform,
     displayType: DisplayType,
@@ -581,9 +582,9 @@ fun CameraScanScreen(
                                                         }
 
                                                         val automatic = if (selectedLayout == ScoreboardLayout.AUTO) {
-                                                            detector.detectAuto(frame, locatedRegion = region)
+                                                            detector.detectAuto(frame, locatedRegion = region, preferredTeamSize = preferredTeamSize)
                                                         } else {
-                                                            val result = detector.detectLocated(frame, region, selectedLayout)
+                                                            val result = detector.detectLocated(frame, region, selectedLayout, preferredTeamSize = preferredTeamSize)
                                                             AutoDetectionResult(
                                                                 result = result,
                                                                 layout = selectedLayout,
