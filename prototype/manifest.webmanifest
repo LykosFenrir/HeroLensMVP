@@ -1,0 +1,30 @@
+{
+  "name": "HeroLens V5 Supreme",
+  "short_name": "HeroLens",
+  "description": "Unofficial live scoreboard hero-pick coach with explainable synergy and counter recommendations.",
+  "start_url": "./index.html#scanSection",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0c1017",
+  "theme_color": "#0c1017",
+  "orientation": "any",
+  "categories": ["games", "utilities"],
+  "shortcuts": [
+    {
+      "name": "Scan scoreboard",
+      "short_name": "Scan",
+      "url": "./index.html#scanSection",
+      "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    },
+    {
+      "name": "Recent picks",
+      "short_name": "History",
+      "url": "./index.html#historySection",
+      "icons": [{"src": "icon-192.png", "sizes": "192x192", "type": "image/png"}]
+    }
+  ],
+  "icons": [
+    {"src": "icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any maskable"},
+    {"src": "icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"}
+  ]
+}
