@@ -139,6 +139,7 @@ private data class CapturedFrameCandidate(
 fun CameraScanScreen(
     autoScan: Boolean,
     autoOpenResults: Boolean,
+    quickResponse: Boolean = false,
     showDetections: Boolean,
     hapticFeedback: Boolean,
     defaultZoom: Float,
@@ -300,7 +301,10 @@ fun CameraScanScreen(
         warning = null
         datasetMessage = null
         hapticSent = false
-        burstTarget = scanMode.burstFrames
+        val targetFrameCount = if (quickResponse) 4 else scanMode.burstFrames
+        val requiredVotes = if (quickResponse) 2 else scanMode.minimumVotes
+        val requiredConfidence = if (quickResponse) minOf(scanMode.minimumConfidence, 0.46f) else scanMode.minimumConfidence
+        burstTarget = targetFrameCount
         burstFrames = 0
         stableSlots = 0
         readyToImport = false
@@ -308,15 +312,15 @@ fun CameraScanScreen(
         detections = placeholderDetections(detectedTeamSize)
         bestFrameRef.set(null)
         val session = BurstScanSession(
-            targetFrames = scanMode.burstFrames,
-            minimumVotes = scanMode.minimumVotes,
-            minimumAverageConfidence = scanMode.minimumConfidence
+            targetFrames = targetFrameCount,
+            minimumVotes = requiredVotes,
+            minimumAverageConfidence = requiredConfidence
         )
         burstSessionRef.set(session)
-        burstDeadline.set(System.currentTimeMillis() + 6_000L)
+        burstDeadline.set(System.currentTimeMillis() + if (quickResponse) 4_000L else 6_000L)
         phase = ScanPhase.CAPTURING
         phaseRef.set(ScanPhase.CAPTURING)
-        status = "Scanning — hold steady"
+        status = if (quickResponse) "Quick scan — hold steady for a moment" else "Scanning — hold steady"
     }
 
     fun scanAgain() {
@@ -336,7 +340,7 @@ fun CameraScanScreen(
         warning = null
     }
 
-    fun useReviewedTeams() {
+    fun useReviewedTeams(allowPartial: Boolean = false) {
         val allyDetections = detections.filter { it.team == TeamSide.ALLY }.sortedBy { it.slot }
         val enemyDetections = detections.filter { it.team == TeamSide.ENEMY }.sortedBy { it.slot }
         val currentHero = ownAllySlot?.let { selected -> allyDetections.firstOrNull { it.slot == selected }?.heroId }
@@ -346,8 +350,14 @@ fun CameraScanScreen(
             .distinct()
             .take(if (ownAllySlot == null) detectedTeamSize else (detectedTeamSize - 1).coerceAtLeast(4))
         val enemies = enemyDetections.mapNotNull { it.heroId }.distinct().take(detectedTeamSize)
-        if (enemies.size < detectedTeamSize || allies.size < detectedTeamSize - 1) {
-            warning = "Correct the unknown slots before using the lineup. Your own ally row can remain optional."
+        val minimumEnemies = if (allowPartial) 3 else detectedTeamSize
+        val minimumAllies = if (allowPartial) 2 else detectedTeamSize - 1
+        if (enemies.size < minimumEnemies || allies.size < minimumAllies) {
+            warning = if (allowPartial) {
+                "Quick scan needs at least three enemies and two allies. Hold steady and scan again, or correct the empty slots."
+            } else {
+                "Correct the unknown slots before using the lineup. Your own ally row can remain optional."
+            }
             return
         }
         val confidence = averageConfidence()
@@ -389,20 +399,31 @@ fun CameraScanScreen(
             templatesLoadedCount = detector.warmUp { progress ->
                 scope.launch { status = progress }
             }
-            templatesReady = templatesLoadedCount > 0
-            status = if (templatesReady) "Aim at the scoreboard, then tap Scan" else "Recognition references unavailable"
+            templatesReady = detector.aiAvailable || templatesLoadedCount > 0
+            status = when {
+                detector.aiAvailable -> "Neural AI ready — aim at the scoreboard"
+                templatesReady -> "Aim at the scoreboard, then tap Scan"
+                else -> "Recognition references unavailable"
+            }
         }.onFailure {
             warning = it.message ?: "Recognition references could not be prepared"
         }
     }
 
-    LaunchedEffect(phase, readyToImport) {
+    LaunchedEffect(phase, readyToImport, quickResponse) {
         phaseRef.set(phase)
-        if (phase == ScanPhase.REVIEW && readyToImport && autoOpenResults) {
-            val allHighConfidence = detections.filter { it.heroId != null }.all { it.confidence >= 0.72f }
-            if (allHighConfidence) {
-                delay(650)
-                useReviewedTeams()
+        if (phase == ScanPhase.REVIEW && autoOpenResults) {
+            val alliesKnown = detections.count { it.team == TeamSide.ALLY && it.heroId != null }
+            val enemiesKnown = detections.count { it.team == TeamSide.ENEMY && it.heroId != null }
+            if (quickResponse && enemiesKnown >= 3 && alliesKnown >= 2) {
+                delay(180)
+                useReviewedTeams(allowPartial = true)
+            } else if (readyToImport) {
+                val allHighConfidence = detections.filter { it.heroId != null }.all { it.confidence >= 0.72f }
+                if (allHighConfidence) {
+                    delay(650)
+                    useReviewedTeams()
+                }
             }
         }
     }
@@ -425,7 +446,7 @@ fun CameraScanScreen(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("SCAN BURST", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text(if (quickResponse) "QUICK AUTO SCAN" else "SCAN BURST", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                         Text(status, color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodySmall)
                     }
                     TextButton(onClick = ::closeScanner) { Text("CLOSE") }
@@ -476,7 +497,9 @@ fun CameraScanScreen(
                                             analysis.setAnalyzer(analyzerExecutor) { image ->
                                                 val now = System.currentTimeMillis()
                                                 val currentPhase = phaseRef.get()
-                                                val interval = if (currentPhase == ScanPhase.CAPTURING) scanMode.intervalMs else 180L
+                                                val interval = if (currentPhase == ScanPhase.CAPTURING) {
+                                                    if (quickResponse) 110L else scanMode.intervalMs
+                                                } else 180L
                                                 if (now - lastAnalysisAt.get() < interval || !busy.compareAndSet(false, true)) {
                                                     image.close()
                                                     return@setAnalyzer
@@ -523,7 +546,8 @@ fun CameraScanScreen(
                                                                     applyZoom(zoomRatioRef.get() * 1.18f)
                                                                     status = "Auto-framing scoreboard…"
                                                                 }
-                                                                if (autoScan && votes >= 4 && phase == ScanPhase.AIMING) startBurst()
+                                                                val votesNeeded = if (quickResponse) 2 else 4
+                                                                if (autoScan && votes >= votesNeeded && phase == ScanPhase.AIMING) startBurst()
                                                             }
                                                             return@launch
                                                         }
@@ -712,7 +736,7 @@ fun CameraScanScreen(
                                 ScanPhase.CAPTURING -> OutlinedButton(onClick = { enterReview(null) }) { Text("STOP") }
                                 ScanPhase.REVIEW -> {
                                     OutlinedButton(onClick = ::scanAgain) { Text("AGAIN") }
-                                    Button(onClick = ::useReviewedTeams) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
+                                    Button(onClick = { useReviewedTeams() }) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
                                 }
                             }
                         }
@@ -781,7 +805,7 @@ fun CameraScanScreen(
                         style = MaterialTheme.typography.labelSmall
                     )
                     Text(
-                        "Detector: $templatesLoadedCount heroes · Locator: ${locatorState.name.lowercase().replaceFirstChar(Char::uppercase)} ${(locatorConfidence * 100).roundToInt()}% · Frame $frameDimensions · Camera max ${String.format(Locale.US, "%.1f", maxZoomRatio)}×",
+                        "Detector: ${if (detector.aiAvailable) "Neural AI" else "Template fallback"} · $templatesLoadedCount heroes · Locator: ${locatorState.name.lowercase().replaceFirstChar(Char::uppercase)} ${(locatorConfidence * 100).roundToInt()}% · Frame $frameDimensions · Camera max ${String.format(Locale.US, "%.1f", maxZoomRatio)}×",
                         color = Color(0xFF83D8FF),
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -815,12 +839,12 @@ fun CameraScanScreen(
 
                     when (phase) {
                         ScanPhase.AIMING -> Button(onClick = ::startBurst, modifier = Modifier.fillMaxWidth().height(58.dp)) {
-                            Text("SCAN ${scanMode.burstFrames} FRAMES", fontWeight = FontWeight.Black)
+                            Text(if (quickResponse) "START QUICK SCAN" else "SCAN ${scanMode.burstFrames} FRAMES", fontWeight = FontWeight.Black)
                         }
                         ScanPhase.CAPTURING -> OutlinedButton(onClick = { enterReview(null) }, modifier = Modifier.fillMaxWidth()) { Text("STOP AND REVIEW") }
                         ScanPhase.REVIEW -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                             OutlinedButton(onClick = ::scanAgain, modifier = Modifier.weight(1f)) { Text("SCAN AGAIN") }
-                            Button(onClick = ::useReviewedTeams, modifier = Modifier.weight(1f)) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
+                            Button(onClick = { useReviewedTeams() }, modifier = Modifier.weight(1f)) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
                         }
                     }
 

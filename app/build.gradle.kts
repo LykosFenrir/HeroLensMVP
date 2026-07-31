@@ -12,8 +12,8 @@ android {
         applicationId = "com.herolens.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 15
-        versionName = "0.7.0"
+        versionCode = 16
+        versionName = "0.8.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -67,6 +67,7 @@ dependencies {
     implementation("androidx.camera:camera-lifecycle:$cameraXVersion")
     implementation("androidx.camera:camera-view:$cameraXVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")

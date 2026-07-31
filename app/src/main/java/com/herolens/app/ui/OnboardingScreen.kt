@@ -50,21 +50,21 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         listOf(
             IntroPage(
                 symbol = "⌗",
-                eyebrow = "SCAN BURST",
-                title = "Aim. Tap. Review.",
-                body = "Center the scoreboard, tap Scan, and hold steady for a short burst. HeroLens then pauses so you can correct every uncertain hero."
+                eyebrow = "THREE SCAN MODES",
+                title = "Fast, stable or manual",
+                body = "Use Auto Scan for quick live-match picks, Picture Scan for a clear photo or screenshot, or Manual Selection when you need a guaranteed fallback."
             ),
             IntroPage(
-                symbol = "◎",
-                eyebrow = "EXPLAINABLE COACH",
-                title = "Know why the pick works",
-                body = "Every recommendation explains the enemy it pressures, the ally it enables, the map fit, the risks and the first three things to do."
+                symbol = "AI",
+                eyebrow = "ON-DEVICE RECOGNITION",
+                title = "Neural AI with a safe fallback",
+                body = "When the trained model is installed, portrait crops are classified locally on your phone. Uncertain slots remain editable and the signature matcher stays available as a fallback."
             ),
             IntroPage(
                 symbol = "◈",
-                eyebrow = "PRIVATE BY DESIGN",
-                title = "You control the training data",
-                body = "Nothing is uploaded automatically. Optional training collection saves only cropped scoreboard cells after you review them, and you can export or delete them anytime."
+                eyebrow = "EXPLAINABLE & PRIVATE",
+                title = "Know why the pick works",
+                body = "Recommendations explain counters and synergy. Nothing is uploaded automatically; optional reviewed training crops remain under your control."
             )
         )
     }
@@ -87,7 +87,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                 .padding(24.dp)
         ) {
             Text(
-                "HEROLENS V7",
+                "HEROLENS V8",
                 modifier = Modifier.align(Alignment.TopStart),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Black

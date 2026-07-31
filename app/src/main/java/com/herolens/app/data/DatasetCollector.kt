@@ -79,7 +79,7 @@ class DatasetCollector(private val context: Context) {
 
             val metadata = JSONObject()
                 .put("schema", 1)
-                .put("appVersion", "0.7.0")
+                .put("appVersion", "0.8.0")
                 .put("timestamp", timestamp)
                 .put("source", source)
                 .put("platform", platform.name)

@@ -9,13 +9,22 @@ import android.content.Context
  */
 class TemplateHeroDetector(context: Context) : HeroDetector {
     private val repository = HeroTemplateRepository(context.applicationContext)
+    private val aiClassifier = OnnxHeroClassifier(context.applicationContext)
     @Volatile private var cachedTemplates: Map<String, List<ImageSignature>>? = null
     @Volatile private var cachedFailures: List<String> = emptyList()
 
     suspend fun warmUp(onProgress: (String) -> Unit = {}): Int {
+        if (aiClassifier.isAvailable) {
+            cachedTemplates = emptyMap()
+            onProgress("AI classifier ready · ${aiClassifier.modelLabelCount} labels")
+            return (aiClassifier.modelLabelCount - 1).coerceAtLeast(1)
+        }
         ensureTemplates(onProgress)
         return cachedTemplates?.size ?: 0
     }
+
+    val aiAvailable: Boolean
+        get() = aiClassifier.isAvailable
 
     suspend fun detectAuto(
         frame: ScoreboardFrame,
@@ -105,6 +114,10 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
 
     private suspend fun ensureTemplates(onProgress: (String) -> Unit) {
         if (cachedTemplates != null) return
+        if (aiClassifier.isAvailable) {
+            cachedTemplates = emptyMap()
+            return
+        }
         val loadResult = repository.load(onProgress)
         cachedTemplates = loadResult.signatures
         cachedFailures = loadResult.failures
@@ -118,9 +131,14 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         onProgress: (String) -> Unit
     ): DetectionResult {
         val templates = cachedTemplates.orEmpty()
-        if (templates.isEmpty()) return noTemplates(teamSize, region)
+        if (templates.isEmpty() && !aiClassifier.isAvailable) return noTemplates(teamSize, region)
         val profiles = ScoreboardSlots.localizedProfiles(region, layout, teamSize)
-        val rankedProfiles = rankGeometryProfiles(frame, profiles, templates, limit = 4)
+        val rankedProfiles = rankGeometryProfiles(
+            frame,
+            profiles,
+            templates,
+            limit = if (aiClassifier.isAvailable) 2 else 4
+        )
         return rankedProfiles.mapIndexed { profileIndex, ranked ->
             detectProfile(
                 frame = frame,
@@ -143,7 +161,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         onProgress: (String) -> Unit
     ): DetectionResult {
         val templates = cachedTemplates.orEmpty()
-        if (templates.isEmpty()) return noTemplates(5, null)
+        if (templates.isEmpty() && !aiClassifier.isAvailable) return noTemplates(5, null)
         return ScoreboardSlots.profiles(layout).mapIndexed { profileIndex, slots ->
             detectProfile(
                 frame = frame,
@@ -168,78 +186,112 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         onProgress: (Int) -> Unit
     ): DetectionResult {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
-        val detections = slots.mapIndexed { index, (team, rect) ->
-            onProgress(index + 1)
-            val signatures = ScoreboardSlots.jittered(rect).map { candidateRect ->
-                val crop = SignatureMath.crop(frame, candidateRect)
-                SignatureMath.signature(crop.rgba, crop.width, crop.height)
+        val detections = if (aiClassifier.isAvailable) {
+            val cropGroups = slots.map { (_, rect) ->
+                ScoreboardSlots.jittered(rect).take(5).map { candidateRect ->
+                    SignatureMath.crop(frame, candidateRect)
+                }
             }
-            val used = usedByTeam.getOrPut(team) { mutableSetOf() }
-            // Cheap hash/histogram pass first, then expensive luminance/edge
-            // correlation only for the strongest candidates. This keeps live scanning
-            // responsive on mid-range phones.
-            val shortlist = templates.entries
-                .map { (heroId, templateVariants) ->
-                    heroId to signatures.maxOf { cameraSignature ->
-                        templateVariants.maxOf { template ->
-                            SignatureMath.quickSimilarity(cameraSignature, template)
+            val flatCrops = cropGroups.flatten()
+            val predictions = aiClassifier.classifyBatch(flatCrops, topK = 7)
+            var predictionOffset = 0
+            slots.mapIndexed { index, (team, rect) ->
+                onProgress(index + 1)
+                val cropCount = cropGroups[index].size
+                val slotPredictions = predictions
+                    .subList(predictionOffset, (predictionOffset + cropCount).coerceAtMost(predictions.size))
+                predictionOffset += cropCount
+                val scores = mutableMapOf<String, Float>()
+                slotPredictions.flatten().forEach { candidate ->
+                    scores[candidate.heroId] = maxOf(scores[candidate.heroId] ?: 0f, candidate.confidence)
+                }
+                val ranked = scores.entries.sortedByDescending { it.value }.map { it.key to it.value }
+                val used = usedByTeam.getOrPut(team) { mutableSetOf() }
+                val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
+                val best = available.firstOrNull()
+                val second = available.getOrNull(1)?.second ?: 0f
+                val bestScore = best?.second ?: 0f
+                val margin = (bestScore - second).coerceAtLeast(0f)
+                val confidence = (bestScore * 0.84f + (margin / 0.28f).coerceIn(0f, 1f) * 0.16f).coerceIn(0f, 0.99f)
+                val accepted = best != null && bestScore >= 0.42f && margin >= 0.045f
+                if (accepted) used += best!!.first
+                HeroDetection(
+                    heroId = best?.first?.takeIf { accepted },
+                    team = team,
+                    slot = index % teamSize,
+                    confidence = confidence,
+                    alternatives = available.take(3).map { (heroId, score) -> HeroCandidate(heroId, score) },
+                    bounds = rect
+                )
+            }
+        } else {
+            slots.mapIndexed { index, (team, rect) ->
+                onProgress(index + 1)
+                val crops = ScoreboardSlots.jittered(rect).map { candidateRect ->
+                    SignatureMath.crop(frame, candidateRect)
+                }
+                val signatures = crops.map { crop ->
+                    SignatureMath.signature(crop.rgba, crop.width, crop.height)
+                }
+                val used = usedByTeam.getOrPut(team) { mutableSetOf() }
+                // Cheap hash/histogram pass first, then expensive luminance/edge
+                // correlation only for the strongest candidates.
+                val shortlist = templates.entries
+                    .map { (heroId, templateVariants) ->
+                        heroId to signatures.maxOf { cameraSignature ->
+                            templateVariants.maxOf { template ->
+                                SignatureMath.quickSimilarity(cameraSignature, template)
+                            }
                         }
                     }
-                }
-                .sortedByDescending { it.second }
-                .take(12)
-                .map { it.first }
-                .toSet()
-            val ranked = templates.entries
-                .asSequence()
-                .filter { it.key in shortlist }
-                .map { (heroId, templateVariants) ->
-                    heroId to signatures.maxOf { cameraSignature ->
-                        templateVariants.maxOf { template ->
-                            SignatureMath.similarity(cameraSignature, template)
+                    .sortedByDescending { it.second }
+                    .take(12)
+                    .map { it.first }
+                    .toSet()
+                val ranked = templates.entries
+                    .asSequence()
+                    .filter { it.key in shortlist }
+                    .map { (heroId, templateVariants) ->
+                        heroId to signatures.maxOf { cameraSignature ->
+                            templateVariants.maxOf { template ->
+                                SignatureMath.similarity(cameraSignature, template)
+                            }
                         }
                     }
-                }
-                .sortedByDescending { it.second }
-                .toList()
-            val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
-            val best = available.first()
-            val second = available.getOrNull(1)?.second ?: -1f
-            val third = available.getOrNull(2)?.second ?: -1f
-            val bestScore = best.second.coerceIn(-1f, 1f)
-            val margin = (bestScore - second).coerceAtLeast(0f)
-            val separation = (bestScore - third).coerceAtLeast(0f)
-
-            /*
-             * V6.3 mapped a neutral correlation of 0.0 to 50% confidence by using
-             * (score + 1) / 2. Random role icons and flat panel cells therefore
-             * appeared as believable 47–61% hero matches and could stabilize over
-             * several frames. V6.4 calibrates confidence around the useful positive
-             * correlation range and requires a real lead over the runner-up.
-             */
-            val absoluteEvidence = ((bestScore - 0.08f) / 0.52f).coerceIn(0f, 1f)
-            val marginEvidence = (margin / 0.16f).coerceIn(0f, 1f)
-            val separationEvidence = (separation / 0.24f).coerceIn(0f, 1f)
-            val confidence = (
-                absoluteEvidence * 0.68f +
-                    marginEvidence * 0.24f +
-                    separationEvidence * 0.08f
-                ).coerceIn(0f, 0.99f)
-            val accepted = bestScore >= 0.18f && margin >= 0.018f && confidence >= 0.30f
-            if (accepted) used += best.first
-            HeroDetection(
-                heroId = best.first.takeIf { accepted },
-                team = team,
-                slot = index % teamSize,
-                confidence = confidence,
-                alternatives = available.take(3).map { (heroId, score) ->
-                    HeroCandidate(heroId, ((score - 0.08f) / 0.52f).coerceIn(0f, 1f))
-                },
-                bounds = rect
-            )
+                    .sortedByDescending { it.second }
+                    .toList()
+                val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
+                val best = available.firstOrNull()
+                val second = available.getOrNull(1)?.second ?: -1f
+                val third = available.getOrNull(2)?.second ?: -1f
+                val bestScore = best?.second?.coerceIn(-1f, 1f) ?: -1f
+                val margin = (bestScore - second).coerceAtLeast(0f)
+                val separation = (bestScore - third).coerceAtLeast(0f)
+                val absoluteEvidence = ((bestScore - 0.08f) / 0.52f).coerceIn(0f, 1f)
+                val marginEvidence = (margin / 0.16f).coerceIn(0f, 1f)
+                val separationEvidence = (separation / 0.24f).coerceIn(0f, 1f)
+                val confidence = (
+                    absoluteEvidence * 0.68f +
+                        marginEvidence * 0.24f +
+                        separationEvidence * 0.08f
+                    ).coerceIn(0f, 0.99f)
+                val accepted = best != null && bestScore >= 0.18f && margin >= 0.018f && confidence >= 0.30f
+                if (accepted) used += best!!.first
+                HeroDetection(
+                    heroId = best?.first?.takeIf { accepted },
+                    team = team,
+                    slot = index % teamSize,
+                    confidence = confidence,
+                    alternatives = available.take(3).map { (heroId, score) ->
+                        HeroCandidate(heroId, ((score - 0.08f) / 0.52f).coerceIn(0f, 1f))
+                    },
+                    bounds = rect
+                )
+            }
         }
         val lowConfidence = detections.count { it.heroId == null || it.confidence < 0.55f }
         val warnings = buildList {
+            if (aiClassifier.isAvailable) add("Neural classifier active.")
             if (cachedFailures.isNotEmpty()) add("${cachedFailures.size} portrait templates failed to load.")
             if (lowConfidence > 0) add("$lowConfidence slots are still uncertain.")
         }

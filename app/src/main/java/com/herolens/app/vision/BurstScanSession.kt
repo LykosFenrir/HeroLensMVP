@@ -1,7 +1,7 @@
 package com.herolens.app.vision
 
 /**
- * Fixed-length scan burst used by V7. A burst avoids endless camera processing and
+ * Fixed-length scan burst used by V8. A burst avoids endless camera processing and
  * makes the capture moment explicit: aim, tap Scan, hold steady, review.
  */
 class BurstScanSession(

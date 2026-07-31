@@ -5,6 +5,8 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -61,6 +63,7 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.window.Dialog
+import androidx.core.content.FileProvider
 import com.herolens.app.R
 import com.herolens.app.core.Hero
 import com.herolens.app.core.HeroCatalog
@@ -81,6 +84,7 @@ import com.herolens.app.data.ScanHistoryEntry
 import com.herolens.app.data.ScanMode
 import com.herolens.app.data.ScannerSettings
 import com.herolens.app.vision.ScoreboardLayout
+import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -104,6 +108,9 @@ fun HeroLensApp() {
     var ultimateChargeText by rememberSaveable { mutableStateOf(initialPlayerState.ultimateCharge.toString()) }
     var showResults by rememberSaveable { mutableStateOf(false) }
     var showScanner by rememberSaveable { mutableStateOf(false) }
+    var quickAutoScan by rememberSaveable { mutableStateOf(false) }
+    var pictureUri by remember { mutableStateOf<Uri?>(null) }
+    var pendingCaptureUri by remember { mutableStateOf<Uri?>(null) }
     var selectedTabName by rememberSaveable { mutableStateOf(MainTab.SCAN.name) }
     var pickerTarget by remember { mutableStateOf<PickerTarget?>(null) }
     var scanConfidence by rememberSaveable { mutableStateOf(0) }
@@ -114,6 +121,22 @@ fun HeroLensApp() {
     val preferences = remember { mutableStateMapOf<String, Int>().apply { putAll(initialPlayerState.heroPool) } }
     val history = remember {
         mutableStateListOf<ScanHistoryEntry>().apply { addAll(store.loadHistory()) }
+    }
+
+    val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
+        if (uri != null) pictureUri = uri
+    }
+    val takePictureLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { saved ->
+        if (saved) pictureUri = pendingCaptureUri
+        pendingCaptureUri = null
+    }
+
+    fun takeScoreboardPicture() {
+        val directory = File(context.cacheDir, "picture_scan").apply { mkdirs() }
+        val file = File(directory, "scoreboard_${System.currentTimeMillis()}.jpg")
+        val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+        pendingCaptureUri = uri
+        takePictureLauncher.launch(uri)
     }
 
     LaunchedEffect(settings) { store.saveSettings(settings) }
@@ -166,6 +189,27 @@ fun HeroLensApp() {
         store.saveHistory(history)
     }
 
+    fun applyDetectedResults(
+        detectedAllies: List<String>,
+        detectedEnemies: List<String>,
+        detectedCurrentHero: String?,
+        confidence: Int
+    ) {
+        allyIds.clear()
+        allyIds.addAll(detectedAllies.take(5))
+        enemyIds.clear()
+        enemyIds.addAll(detectedEnemies.take(6))
+        currentHeroId = detectedCurrentHero
+        scanConfidence = confidence
+        detectedCurrentHero?.let { heroId ->
+            HeroCatalog.byId[heroId]?.role?.let { roleName = it.name }
+        }
+        showScanner = false
+        quickAutoScan = false
+        pictureUri = null
+        showResults = true
+    }
+
     if (!settings.onboardingComplete) {
         OnboardingScreen(onFinish = { settings = settings.copy(onboardingComplete = true) })
         return
@@ -173,8 +217,9 @@ fun HeroLensApp() {
 
     if (showScanner) {
         CameraScanScreen(
-            autoScan = settings.autoScan,
-            autoOpenResults = settings.autoOpenResults,
+            autoScan = if (quickAutoScan) true else settings.autoScan,
+            autoOpenResults = if (quickAutoScan) true else settings.autoOpenResults,
+            quickResponse = quickAutoScan,
             showDetections = settings.showDetections,
             hapticFeedback = settings.hapticFeedback,
             defaultZoom = settings.defaultZoom,
@@ -184,20 +229,20 @@ fun HeroLensApp() {
             collectTrainingData = settings.collectTrainingData,
             inputPlatform = settings.inputPlatform,
             displayType = settings.displayType,
-            onClose = { showScanner = false },
-            onUseDetections = { detectedAllies, detectedEnemies, detectedCurrentHero, confidence ->
-                allyIds.clear()
-                allyIds.addAll(detectedAllies.take(5))
-                enemyIds.clear()
-                enemyIds.addAll(detectedEnemies.take(6))
-                currentHeroId = detectedCurrentHero
-                scanConfidence = confidence
-                detectedCurrentHero?.let { heroId ->
-                    HeroCatalog.byId[heroId]?.role?.let { roleName = it.name }
-                }
+            onClose = {
                 showScanner = false
-                showResults = true
-            }
+                quickAutoScan = false
+            },
+            onUseDetections = ::applyDetectedResults
+        )
+    } else if (pictureUri != null) {
+        PictureScanScreen(
+            imageUri = requireNotNull(pictureUri),
+            collectTrainingData = settings.collectTrainingData,
+            inputPlatform = settings.inputPlatform,
+            displayType = settings.displayType,
+            onClose = { pictureUri = null },
+            onUseDetections = ::applyDetectedResults
         )
     } else if (showResults) {
         ResultsScreen(
@@ -261,7 +306,13 @@ fun HeroLensApp() {
                             ultimateChargeText = value.filter(Char::isDigit).take(3)
                         },
                         rank = settings.rank,
-                        onOpenCamera = { showScanner = true },
+                        onOpenAutoScan = {
+                            quickAutoScan = true
+                            showScanner = true
+                        },
+                        onTakePicture = ::takeScoreboardPicture,
+                        onChoosePicture = { galleryLauncher.launch("image/*") },
+                        onStartManual = { pickerTarget = PickerTarget.ENEMY },
                         onOpenPicker = { pickerTarget = it },
                         onAnalyze = {
                             scanConfidence = 0
@@ -331,7 +382,10 @@ private fun ScanHomeScreen(
     ultimateChargeText: String,
     onUltimateChargeChanged: (String) -> Unit,
     rank: RankTier,
-    onOpenCamera: () -> Unit,
+    onOpenAutoScan: () -> Unit,
+    onTakePicture: () -> Unit,
+    onChoosePicture: () -> Unit,
+    onStartManual: () -> Unit,
     onOpenPicker: (PickerTarget) -> Unit,
     onAnalyze: () -> Unit
 ) {
@@ -361,12 +415,37 @@ private fun ScanHomeScreen(
                 shape = RoundedCornerShape(24.dp)
             ) {
                 Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text("LIVE SCOREBOARD SCAN", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
-                    Text("Point the phone at the scoreboard. The native camera opens immediately and locks the lineup after several frames agree.")
-                    Button(onClick = onOpenCamera, modifier = Modifier.fillMaxWidth().height(54.dp)) {
-                        Text("OPEN LIVE SCANNER", fontWeight = FontWeight.Black)
+                    Text("AUTO SCAN · FASTEST", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+                    Text("Aim at the scoreboard. HeroLens starts a short four-frame scan and opens recommendations as soon as a useful lineup is confirmed.")
+                    Button(onClick = onOpenAutoScan, modifier = Modifier.fillMaxWidth().height(54.dp)) {
+                        Text("START AUTO SCAN", fontWeight = FontWeight.Black)
                     }
-                    Text("Manual selection remains available below as a fallback.", style = MaterialTheme.typography.bodySmall)
+                    Text("Designed to return picks quickly and reduce time spent on the scoreboard.", style = MaterialTheme.typography.bodySmall)
+                }
+            }
+        }
+
+        item {
+            Card(shape = RoundedCornerShape(24.dp)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("PICTURE SCAN · MOST STABLE", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+                    Text("Take one clear picture or choose an existing screenshot. Review uncertain slots before using the result.")
+                    Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Button(onClick = onTakePicture, modifier = Modifier.weight(1f)) { Text("TAKE PICTURE", fontWeight = FontWeight.Bold) }
+                        OutlinedButton(onClick = onChoosePicture, modifier = Modifier.weight(1f)) { Text("CHOOSE IMAGE", fontWeight = FontWeight.Bold) }
+                    }
+                }
+            }
+        }
+
+        item {
+            Card(shape = RoundedCornerShape(24.dp)) {
+                Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text("MANUAL SELECTION · ALWAYS WORKS", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+                    Text("Select enemy and ally heroes directly when you need an instant fallback without using the camera.")
+                    OutlinedButton(onClick = onStartManual, modifier = Modifier.fillMaxWidth().height(50.dp)) {
+                        Text("SELECT HEROES MANUALLY", fontWeight = FontWeight.Black)
+                    }
                 }
             }
         }
@@ -1059,7 +1138,7 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         item {
             SettingsCard(title = "Data and model", description = "Versioned components make future patch and model updates replaceable without redesigning the app.") {
                 Text("Hero data: ${HeroCatalog.DATA_VERSION}", fontWeight = FontWeight.Bold)
-                Text("Recommendation weights: V7 Explainable Coach", fontWeight = FontWeight.Bold)
+                Text("Recommendation weights: V8 AI Explainable Coach", fontWeight = FontWeight.Bold)
                 Text("Recognition: tap-to-scan burst · scoreboard locator · review/correct workflow · LiteRT model slot ready", fontWeight = FontWeight.Bold)
                 Text("OTA endpoint is not configured in this MVP; updates are bundled with source releases.", style = MaterialTheme.typography.bodySmall)
             }
