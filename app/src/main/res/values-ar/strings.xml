@@ -62,4 +62,5 @@
     <string name="pause">إيقاف مؤقت</string>
     <string name="rescan">إعادة الفحص</string>
     <string name="use_now">استخدام الآن</string>
+    <string name="tap_to_focus_hint">اضغط على منطقة لوحة النتائج للتركيز. استخدم القرص للتكبير واضبط التعريض عند الحاجة.</string>
 </resources>

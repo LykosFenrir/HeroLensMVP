@@ -8,21 +8,25 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.Uri
 import android.provider.Settings
+import android.util.Size as AndroidSize
 import android.view.MotionEvent
 import android.view.WindowManager
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.AspectRatio
 import androidx.camera.core.Camera
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.FocusMeteringAction
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
+import androidx.camera.core.resolutionselector.AspectRatioStrategy
+import androidx.camera.core.resolutionselector.ResolutionSelector
+import androidx.camera.core.resolutionselector.ResolutionStrategy
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -35,6 +39,8 @@ import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -47,6 +53,7 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -65,6 +72,7 @@ import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.drawscope.Stroke
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.res.stringResource
@@ -77,7 +85,11 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.herolens.app.R
 import com.herolens.app.core.Hero
 import com.herolens.app.core.HeroCatalog
+import com.herolens.app.data.ScanMode
+import com.herolens.app.vision.AutoDetectionResult
+import com.herolens.app.vision.DetectionResult
 import com.herolens.app.vision.FrameQualityEvaluator
+import com.herolens.app.vision.HeroCandidate
 import com.herolens.app.vision.HeroDetection
 import com.herolens.app.vision.LiveScanStabilizer
 import com.herolens.app.vision.QualityHint
@@ -97,14 +109,16 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
-private const val ANALYSIS_INTERVAL_MS = 280L
 
 @Composable
 fun CameraScanScreen(
     autoScan: Boolean,
+    autoOpenResults: Boolean,
     showDetections: Boolean,
     hapticFeedback: Boolean,
     defaultZoom: Float,
+    scanMode: ScanMode,
+    preferredLayout: ScoreboardLayout,
     onClose: () -> Unit,
     onUseDetections: (
         allies: List<String>,
@@ -119,7 +133,13 @@ fun CameraScanScreen(
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val detector = remember { TemplateHeroDetector(context) }
-    val stabilizer = remember { LiveScanStabilizer() }
+    val stabilizer = remember(scanMode) {
+        LiveScanStabilizer(
+            windowSize = scanMode.windowSize,
+            minimumVotes = scanMode.minimumVotes,
+            minimumAverageConfidence = scanMode.minimumConfidence
+        )
+    }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
     val busy = remember { AtomicBoolean(false) }
     val liveEnabledRef = remember { AtomicBoolean(true) }
@@ -142,13 +162,21 @@ fun CameraScanScreen(
     var fatalError by remember { mutableStateOf<String?>(null) }
     var detections by remember { mutableStateOf<List<HeroDetection>>(emptyList()) }
     var resolvedLayout by remember { mutableStateOf(ScoreboardLayout.AUTO) }
+    var selectedLayout by remember { mutableStateOf(preferredLayout) }
+    var frameBrightness by remember { mutableStateOf(0f) }
+    var frameSharpness by remember { mutableStateOf(0f) }
+    var qualityHint by remember { mutableStateOf(QualityHint.GOOD) }
+    var exposureIndex by remember { mutableIntStateOf(0) }
+    var exposureMin by remember { mutableIntStateOf(0) }
+    var exposureMax by remember { mutableIntStateOf(0) }
+    var torchOn by remember { mutableStateOf(false) }
     var stableSlots by remember { mutableIntStateOf(0) }
     var framesObserved by remember { mutableIntStateOf(0) }
     var readyToImport by remember { mutableStateOf(false) }
     var imported by remember { mutableStateOf(false) }
     var correctionIndex by remember { mutableStateOf<Int?>(null) }
     var ownAllySlot by remember { mutableStateOf<Int?>(null) }
-    var zoomRatio by remember { mutableStateOf(defaultZoom.coerceIn(1f, 3f)) }
+    var zoomRatio by remember { mutableStateOf(defaultZoom.coerceIn(1f, 5f)) }
     var hapticSent by remember { mutableStateOf(false) }
 
     fun averageConfidence(): Int {
@@ -215,7 +243,7 @@ fun CameraScanScreen(
             hapticSent = true
             if (hapticFeedback) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
         }
-        if (readyToImport && autoScan && !imported) {
+        if (readyToImport && autoOpenResults && !imported) {
             status = context.getString(R.string.lineup_locked)
             delay(650)
             importStableTeams()
@@ -251,6 +279,18 @@ fun CameraScanScreen(
                     .padding(horizontal = 14.dp)
                     .aspectRatio(16f / 9f)
                     .background(Color.Black, RoundedCornerShape(22.dp))
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, _, gestureZoom, _ ->
+                            val camera = cameraRef.get() ?: return@detectTransformGestures
+                            val state = camera.cameraInfo.zoomState.value
+                            val next = (zoomRatio * gestureZoom).coerceIn(
+                                state?.minZoomRatio ?: 1f,
+                                state?.maxZoomRatio ?: 5f
+                            )
+                            zoomRatio = next
+                            camera.cameraControl.setZoomRatio(next)
+                        }
+                    }
             ) {
                 if (permissionGranted) {
                     AndroidView(
@@ -263,13 +303,22 @@ fun CameraScanScreen(
                                 future.addListener({
                                     runCatching {
                                         val provider = future.get()
+                                        val resolutionSelector = ResolutionSelector.Builder()
+                                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                            .setResolutionStrategy(
+                                                ResolutionStrategy(
+                                                    AndroidSize(1280, 720),
+                                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                                )
+                                            )
+                                            .build()
                                         val preview = Preview.Builder()
-                                            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                                            .setResolutionSelector(resolutionSelector)
                                             .setTargetRotation(view.display.rotation)
                                             .build()
                                             .also { it.setSurfaceProvider(view.surfaceProvider) }
                                         val analysis = ImageAnalysis.Builder()
-                                            .setTargetAspectRatio(AspectRatio.RATIO_16_9)
+                                            .setResolutionSelector(resolutionSelector)
                                             .setTargetRotation(view.display.rotation)
                                             .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
                                             .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
@@ -279,7 +328,7 @@ fun CameraScanScreen(
                                             val now = System.currentTimeMillis()
                                             val manualRequest = !autoScan && singleScanRequested.compareAndSet(true, false)
                                             val allowed = autoScan || manualRequest
-                                            if (!templatesReady || !liveEnabledRef.get() || !allowed || busy.get() || now - lastAnalysisAt.get() < ANALYSIS_INTERVAL_MS) {
+                                            if (!templatesReady || !liveEnabledRef.get() || !allowed || busy.get() || now - lastAnalysisAt.get() < scanMode.intervalMs) {
                                                 image.close()
                                                 return@setAnalyzer
                                             }
@@ -301,6 +350,11 @@ fun CameraScanScreen(
                                             scope.launch(Dispatchers.Default) {
                                                 try {
                                                     val quality = FrameQualityEvaluator.evaluate(frame)
+                                                    withContext(Dispatchers.Main) {
+                                                        frameBrightness = quality.brightness
+                                                        frameSharpness = quality.sharpness
+                                                        qualityHint = quality.hint
+                                                    }
                                                     if (!quality.usable) {
                                                         withContext(Dispatchers.Main) {
                                                             status = when (quality.hint) {
@@ -313,7 +367,16 @@ fun CameraScanScreen(
                                                         return@launch
                                                     }
 
-                                                    val automatic = detector.detectAuto(frame)
+                                                    val automatic = if (selectedLayout == ScoreboardLayout.AUTO) {
+                                                        detector.detectAuto(frame)
+                                                    } else {
+                                                        val result = detector.detect(frame, selectedLayout)
+                                                        AutoDetectionResult(
+                                                            result = result,
+                                                            layout = selectedLayout,
+                                                            quality = detectionQuality(result)
+                                                        )
+                                                    }
                                                     val snapshot = stabilizer.add(automatic)
                                                     withContext(Dispatchers.Main) {
                                                         detections = snapshot.detections
@@ -350,9 +413,14 @@ fun CameraScanScreen(
                                         val zoomState = camera.cameraInfo.zoomState.value
                                         zoomRatio = defaultZoom.coerceIn(
                                             zoomState?.minZoomRatio ?: 1f,
-                                            zoomState?.maxZoomRatio ?: 3f
+                                            zoomState?.maxZoomRatio ?: 5f
                                         )
                                         camera.cameraControl.setZoomRatio(zoomRatio)
+                                        val exposureState = camera.cameraInfo.exposureState
+                                        exposureMin = exposureState.exposureCompensationRange.lower
+                                        exposureMax = exposureState.exposureCompensationRange.upper
+                                        exposureIndex = exposureState.exposureCompensationIndex
+                                        torchOn = camera.cameraInfo.torchState.value == 1
 
                                         view.setOnTouchListener { _, event ->
                                             if (event.action == MotionEvent.ACTION_UP) {
@@ -371,7 +439,7 @@ fun CameraScanScreen(
                             }
                         }
                     )
-                    if (showDetections) ScoreboardAlignmentOverlay(resolvedLayout)
+                    if (showDetections) ScoreboardAlignmentOverlay(if (selectedLayout == ScoreboardLayout.AUTO) resolvedLayout else selectedLayout)
                 } else {
                     Column(
                         modifier = Modifier.align(Alignment.Center).padding(20.dp),
@@ -390,7 +458,11 @@ fun CameraScanScreen(
             }
 
             Column(
-                modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 12.dp),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .verticalScroll(rememberScrollState())
+                    .padding(horizontal = 14.dp, vertical = 12.dp),
                 verticalArrangement = Arrangement.spacedBy(10.dp)
             ) {
                 LinearProgressIndicator(
@@ -401,6 +473,24 @@ fun CameraScanScreen(
                     Text("$stableSlots/10 stable · $framesObserved frames", color = Color.White.copy(alpha = 0.72f), modifier = Modifier.weight(1f))
                     Text("${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×", color = Color.White, fontWeight = FontWeight.Bold)
                 }
+                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    ScoreboardLayout.entries.forEach { layout ->
+                        FilterChip(
+                            selected = selectedLayout == layout,
+                            onClick = {
+                                selectedLayout = layout
+                                liveEnabled = true
+                                stabilizer.reset()
+                            },
+                            label = { Text(layout.displayName) }
+                        )
+                    }
+                }
+                Text(
+                    "${scanMode.label} mode · brightness ${(frameBrightness * 100).roundToInt()}% · detail ${(frameSharpness * 1000).roundToInt()} · ${qualityHint.name.lowercase().replaceFirstChar(Char::uppercase)}",
+                    color = Color.White.copy(alpha = 0.65f),
+                    style = MaterialTheme.typography.labelSmall
+                )
 
                 Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                     OutlinedButton(onClick = {
@@ -412,7 +502,7 @@ fun CameraScanScreen(
                     OutlinedButton(onClick = {
                         val camera = cameraRef.get() ?: return@OutlinedButton
                         val state = camera.cameraInfo.zoomState.value
-                        zoomRatio = (zoomRatio + 0.25f).coerceAtMost(state?.maxZoomRatio ?: 3f)
+                        zoomRatio = (zoomRatio + 0.25f).coerceAtMost(state?.maxZoomRatio ?: 5f)
                         camera.cameraControl.setZoomRatio(zoomRatio)
                     }) { Text("+") }
 
@@ -440,6 +530,36 @@ fun CameraScanScreen(
                         Button(onClick = { importStableTeams() }, modifier = Modifier.weight(1f)) {
                             Text(stringResource(R.string.use_now))
                         }
+                    }
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedButton(onClick = {
+                        val camera = cameraRef.get() ?: return@OutlinedButton
+                        // Return to continuous autofocus; tap the preview for point focus.
+                        camera.cameraControl.cancelFocusAndMetering()
+                        status = context.getString(R.string.tap_to_focus_hint)
+                    }) { Text("FOCUS") }
+                    if (cameraRef.get()?.cameraInfo?.hasFlashUnit() == true) {
+                        OutlinedButton(onClick = {
+                            torchOn = !torchOn
+                            cameraRef.get()?.cameraControl?.enableTorch(torchOn)
+                        }) { Text(if (torchOn) "TORCH OFF" else "TORCH") }
+                    }
+                    Text("Pinch to zoom", color = Color.White.copy(alpha = 0.62f), style = MaterialTheme.typography.labelSmall)
+                }
+                if (exposureMax > exposureMin) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("Exposure", color = Color.White, modifier = Modifier.width(70.dp), style = MaterialTheme.typography.labelSmall)
+                        Slider(
+                            value = exposureIndex.toFloat(),
+                            onValueChange = { value ->
+                                exposureIndex = value.roundToInt().coerceIn(exposureMin, exposureMax)
+                                cameraRef.get()?.cameraControl?.setExposureCompensationIndex(exposureIndex)
+                            },
+                            valueRange = exposureMin.toFloat()..exposureMax.toFloat(),
+                            modifier = Modifier.weight(1f)
+                        )
                     }
                 }
 
@@ -490,6 +610,7 @@ fun CameraScanScreen(
     correctionIndex?.let { index ->
         SingleHeroPickerDialog(
             selectedId = detections.getOrNull(index)?.heroId,
+            suggested = detections.getOrNull(index)?.alternatives.orEmpty(),
             onSelect = { heroId ->
                 detections = detections.mapIndexed { itemIndex, detection ->
                     if (itemIndex == index) detection.copy(heroId = heroId, confidence = 1f) else detection
@@ -576,6 +697,7 @@ private fun LiveDetectionStrip(
 @Composable
 private fun SingleHeroPickerDialog(
     selectedId: String?,
+    suggested: List<HeroCandidate>,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
@@ -591,7 +713,21 @@ private fun SingleHeroPickerDialog(
         ) {
             Column(Modifier.padding(18.dp)) {
                 Text(stringResource(R.string.correct_hero), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
-                Spacer(Modifier.height(10.dp))
+                if (suggested.isNotEmpty()) {
+                    Text("TOP MATCHES", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Black)
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        suggested.take(3).forEach { candidate ->
+                            val hero = HeroCatalog.byId[candidate.heroId] ?: return@forEach
+                            FilterChip(
+                                selected = hero.id == selectedId,
+                                onClick = { onSelect(hero.id) },
+                                leadingIcon = { HeroPortrait(hero.id, hero.name, Modifier.size(28.dp)) },
+                                label = { Text("${hero.name} ${(candidate.confidence * 100).roundToInt()}%") }
+                            )
+                        }
+                    }
+                    Spacer(Modifier.height(10.dp))
+                }
                 OutlinedTextField(
                     value = query,
                     onValueChange = { query = it },
@@ -617,6 +753,15 @@ private fun SingleHeroPickerDialog(
             }
         }
     }
+}
+
+
+private fun detectionQuality(result: DetectionResult): Float {
+    val accepted = result.detections.filter { it.heroId != null }
+    if (accepted.isEmpty()) return 0f
+    val coverage = accepted.size / 10f
+    val confidence = accepted.map { it.confidence }.average().toFloat()
+    return coverage * 0.58f + confidence * 0.42f
 }
 
 private fun Context.openAppSettings() {

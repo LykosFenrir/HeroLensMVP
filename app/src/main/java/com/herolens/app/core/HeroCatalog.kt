@@ -1,7 +1,7 @@
 package com.herolens.app.core
 
 object HeroCatalog {
-    const val DATA_VERSION = "2026-07-seed-1"
+    const val DATA_VERSION = "2026-07-live-14-v2"
 
     val heroes: List<Hero> = listOf(
         Hero("dva", "D.Va", Role.TANK, setOf(Trait.DIVE, Trait.MOBILITY, Trait.VERTICALITY, Trait.PEEL, Trait.ANTI_AIR)),

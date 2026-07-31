@@ -1,21 +1,15 @@
-# HeroLens V5 Supreme web camera setup
+# Deploy HeroLens V6 PWA with camera access
 
-The browser camera needs permission **and** a secure origin. A downloaded `index.html` opened from the phone's Downloads folder may be treated as a local `file://` page; Samsung Internet and other Android browsers can block live camera access or cross-origin portrait analysis in that context.
+Mobile browser camera access normally requires HTTPS. Opening `index.html` directly from Downloads can be blocked even after the user has enabled camera permission.
 
-## Easiest test: deploy the complete folder over HTTPS
+## GitHub Pages
 
-1. Extract the `HeroLens-web-v5-supreme.zip` package on a PC.
-2. Use a static HTTPS host such as Netlify Drop, Cloudflare Pages, GitHub Pages or Firebase Hosting.
-3. Upload the **contents of the complete folder**, not only `index.html`.
-4. Open the generated `https://...` address on the phone.
-5. Tap **Allow & start camera**.
-6. Choose **Allow while using the site** when the browser asks for Camera permission.
-7. Optionally use the browser menu → **Add to Home screen** to install the PWA.
+1. Upload the full HeroLens project to GitHub.
+2. Open the repository **Settings → Pages**.
+3. Set the source to **GitHub Actions**.
+4. Open **Actions → Deploy HeroLens PWA**.
+5. Run the workflow from the `main` branch.
+6. Open the resulting HTTPS site on the phone.
+7. Tap **Allow & start camera**, then choose **Allow while using the site**.
 
-## If permission was denied
-
-In Chrome or Samsung Internet, open the site's permissions/settings, set Camera to Allow, reload the page and tap Start again.
-
-## Native Android build
-
-The Android project is preferred for speed and reliability. It uses CameraX directly, declares Camera permission in the manifest, requests it at runtime, and provides an App Settings recovery button.
+The Android APK remains the preferred camera experience because it has direct CameraX control over frame analysis, focus, exposure and permission recovery.

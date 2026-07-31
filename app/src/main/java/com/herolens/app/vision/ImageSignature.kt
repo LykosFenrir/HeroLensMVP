@@ -16,6 +16,7 @@ data class CroppedImage(val rgba: ByteArray, val width: Int, val height: Int)
 data class ImageSignature(
     val luminance: FloatArray,
     val edges: FloatArray,
+    val colorHistogram: FloatArray,
     val hash: Long
 )
 
@@ -37,10 +38,30 @@ object ScoreboardSlots {
             }
         }
     }
+
+    /** Small horizontal/vertical offsets make template matching more tolerant of phone framing. */
+    fun jittered(rect: NormalizedRect): List<NormalizedRect> {
+        val offsets = listOf(
+            0f to 0f,
+            -0.006f to 0f,
+            0.006f to 0f,
+            0f to -0.004f,
+            0f to 0.004f
+        )
+        return offsets.map { (dx, dy) ->
+            NormalizedRect(
+                left = (rect.left + dx).coerceIn(0f, 1f),
+                top = (rect.top + dy).coerceIn(0f, 1f),
+                right = (rect.right + dx).coerceIn(0f, 1f),
+                bottom = (rect.bottom + dy).coerceIn(0f, 1f)
+            )
+        }
+    }
 }
 
 object SignatureMath {
     private const val TARGET = 32
+    private const val COLOR_BINS = 4
 
     fun crop(frame: ScoreboardFrame, rect: NormalizedRect): CroppedImage {
         val left = (rect.left.coerceIn(0f, 1f) * frame.width).toInt().coerceIn(0, frame.width - 1)
@@ -63,6 +84,7 @@ object SignatureMath {
         require(width > 0 && height > 0)
         require(rgba.size >= width * height * 4)
         val gray = FloatArray(TARGET * TARGET)
+        val histogram = FloatArray(COLOR_BINS * COLOR_BINS * COLOR_BINS)
         for (y in 0 until TARGET) {
             val sy = ((y + 0.5f) * height / TARGET).toInt().coerceIn(0, height - 1)
             for (x in 0 until TARGET) {
@@ -72,8 +94,15 @@ object SignatureMath {
                 val g = rgba[i + 1].toInt() and 0xff
                 val b = rgba[i + 2].toInt() and 0xff
                 gray[y * TARGET + x] = (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255f
+                val rb = (r * COLOR_BINS / 256).coerceIn(0, COLOR_BINS - 1)
+                val gb = (g * COLOR_BINS / 256).coerceIn(0, COLOR_BINS - 1)
+                val bb = (b * COLOR_BINS / 256).coerceIn(0, COLOR_BINS - 1)
+                histogram[(rb * COLOR_BINS + gb) * COLOR_BINS + bb] += 1f
             }
         }
+        val sampleCount = (TARGET * TARGET).toFloat()
+        histogram.indices.forEach { histogram[it] /= sampleCount }
+
         val normalized = normalize(gray)
         val edges = FloatArray(TARGET * TARGET)
         for (y in 1 until TARGET - 1) {
@@ -83,14 +112,15 @@ object SignatureMath {
                 edges[y * TARGET + x] = sqrt(gx * gx + gy * gy)
             }
         }
-        return ImageSignature(normalized, normalize(edges), differenceHash(gray))
+        return ImageSignature(normalized, normalize(edges), histogram, differenceHash(gray))
     }
 
     fun similarity(a: ImageSignature, b: ImageSignature): Float {
         val lum = correlation(a.luminance, b.luminance)
         val edge = correlation(a.edges, b.edges)
+        val color = histogramIntersection(a.colorHistogram, b.colorHistogram)
         val hash = 1f - java.lang.Long.bitCount(a.hash xor b.hash) / 64f
-        return (lum * 0.52f + edge * 0.28f + hash * 0.20f).coerceIn(-1f, 1f)
+        return (lum * 0.40f + edge * 0.25f + color * 0.20f + hash * 0.15f).coerceIn(-1f, 1f)
     }
 
     private fun normalize(values: FloatArray): FloatArray {
@@ -117,6 +147,13 @@ object SignatureMath {
         }
         val denominator = sqrt(max(aa * bb, 1e-6f))
         return (dot / denominator).coerceIn(-1f, 1f)
+    }
+
+    private fun histogramIntersection(a: FloatArray, b: FloatArray): Float {
+        val size = min(a.size, b.size)
+        var sum = 0f
+        for (index in 0 until size) sum += min(a[index], b[index])
+        return sum.coerceIn(0f, 1f)
     }
 
     private fun differenceHash(gray: FloatArray): Long {

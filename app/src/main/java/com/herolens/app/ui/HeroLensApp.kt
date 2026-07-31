@@ -71,12 +71,17 @@ import com.herolens.app.core.RecommendationEngine
 import com.herolens.app.core.Role
 import com.herolens.app.core.Trait
 import com.herolens.app.data.AppStore
+import com.herolens.app.data.InputPlatform
+import com.herolens.app.data.PlayerState
 import com.herolens.app.data.RankTier
 import com.herolens.app.data.ScanHistoryEntry
+import com.herolens.app.data.ScanMode
 import com.herolens.app.data.ScannerSettings
+import com.herolens.app.vision.ScoreboardLayout
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.abs
 
 private enum class PickerTarget { ALLY, ENEMY }
 private enum class MainTab(val label: String) { HISTORY("History"), SCAN("Scan"), SETTINGS("Settings") }
@@ -86,10 +91,11 @@ fun HeroLensApp() {
     val context = LocalContext.current
     val store = remember { AppStore(context.applicationContext) }
 
-    var roleName by rememberSaveable { mutableStateOf(Role.DAMAGE.name) }
-    var mapName by rememberSaveable { mutableStateOf(MapProfile.MIXED.name) }
-    var currentHeroId by rememberSaveable { mutableStateOf<String?>(null) }
-    var ultimateChargeText by rememberSaveable { mutableStateOf("0") }
+    val initialPlayerState = remember { store.loadPlayerState() }
+    var roleName by rememberSaveable { mutableStateOf(initialPlayerState.role.name) }
+    var mapName by rememberSaveable { mutableStateOf(initialPlayerState.mapProfile.name) }
+    var currentHeroId by rememberSaveable { mutableStateOf(initialPlayerState.currentHeroId) }
+    var ultimateChargeText by rememberSaveable { mutableStateOf(initialPlayerState.ultimateCharge.toString()) }
     var showResults by rememberSaveable { mutableStateOf(false) }
     var showScanner by rememberSaveable { mutableStateOf(false) }
     var selectedTabName by rememberSaveable { mutableStateOf(MainTab.SCAN.name) }
@@ -99,12 +105,23 @@ fun HeroLensApp() {
 
     val allyIds = remember { mutableStateListOf<String>() }
     val enemyIds = remember { mutableStateListOf<String>() }
-    val preferences = remember { mutableStateMapOf<String, Int>() }
+    val preferences = remember { mutableStateMapOf<String, Int>().apply { putAll(initialPlayerState.heroPool) } }
     val history = remember {
         mutableStateListOf<ScanHistoryEntry>().apply { addAll(store.loadHistory()) }
     }
 
     LaunchedEffect(settings) { store.saveSettings(settings) }
+    LaunchedEffect(roleName, mapName, currentHeroId, ultimateChargeText, preferences.toMap()) {
+        store.savePlayerState(
+            PlayerState(
+                role = Role.valueOf(roleName),
+                mapProfile = MapProfile.valueOf(mapName),
+                currentHeroId = currentHeroId,
+                ultimateCharge = ultimateChargeText.toIntOrNull()?.coerceIn(0, 100) ?: 0,
+                heroPool = preferences.toMap()
+            )
+        )
+    }
 
     val role = Role.valueOf(roleName)
     val mapProfile = MapProfile.valueOf(mapName)
@@ -116,7 +133,8 @@ fun HeroLensApp() {
         preferences = preferences.toMap(),
         currentHeroId = currentHeroId,
         ultimateCharge = ultimateChargeText.toIntOrNull()?.coerceIn(0, 100) ?: 0,
-        rank = settings.rank.name
+        rank = settings.rank.name,
+        inputPlatform = settings.inputPlatform.name
     )
     val recommendations = remember(matchContext) { RecommendationEngine.recommend(matchContext) }
 
@@ -138,16 +156,24 @@ fun HeroLensApp() {
                 entry.timestamp - existing.timestamp < 30_000
         }
         history.add(0, entry)
-        while (history.size > 30) history.removeAt(history.lastIndex)
+        while (history.size > 50) history.removeAt(history.lastIndex)
         store.saveHistory(history)
+    }
+
+    if (!settings.onboardingComplete) {
+        OnboardingScreen(onFinish = { settings = settings.copy(onboardingComplete = true) })
+        return
     }
 
     if (showScanner) {
         CameraScanScreen(
             autoScan = settings.autoScan,
+            autoOpenResults = settings.autoOpenResults,
             showDetections = settings.showDetections,
             hapticFeedback = settings.hapticFeedback,
             defaultZoom = settings.defaultZoom,
+            scanMode = settings.scanMode,
+            preferredLayout = settings.preferredLayout,
             onClose = { showScanner = false },
             onUseDetections = { detectedAllies, detectedEnemies, detectedCurrentHero, confidence ->
                 allyIds.clear()
@@ -172,6 +198,8 @@ fun HeroLensApp() {
             scanConfidence = scanConfidence,
             rank = settings.rank,
             ultimateCharge = matchContext.ultimateCharge,
+            preferences = preferences,
+            inputPlatform = settings.inputPlatform,
             onClose = {
                 saveScanToHistory()
                 showResults = false
@@ -482,6 +510,8 @@ private fun ResultsScreen(
     scanConfidence: Int,
     rank: RankTier,
     ultimateCharge: Int,
+    preferences: Map<String, Int>,
+    inputPlatform: InputPlatform,
     onClose: () -> Unit,
     onEdit: () -> Unit
 ) {
@@ -499,7 +529,7 @@ private fun ResultsScreen(
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("ANALYSIS", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Black)
-                    Text("${rank.label} · ${if (scanConfidence > 0) "Scan $scanConfidence%" else "Manual lineup"}")
+                    Text("${rank.label} · ${inputPlatform.label} · ${if (scanConfidence > 0) "Scan $scanConfidence%" else "Manual lineup"}")
                 }
                 TextButton(onClick = onClose) { Text("CLOSE") }
             }
@@ -523,7 +553,7 @@ private fun ResultsScreen(
         }
 
         if (focused != null) {
-            item { BestPickCard(focused) }
+            item { BestPickCard(focused, pickBadge(focused, recommendations, preferences)) }
             item {
                 SwitchCoachCard(
                     currentHeroId = currentHeroId,
@@ -532,6 +562,8 @@ private fun ResultsScreen(
                     recommendations = recommendations
                 )
             }
+            item { ScoreBreakdownCard(focused) }
+            item { PlaybookCard(focused) }
         }
 
         if (recommendations.size > 1) {
@@ -540,7 +572,7 @@ private fun ResultsScreen(
                 Text("Tap a hero to open the full counter and synergy explanation.", style = MaterialTheme.typography.bodySmall)
                 Spacer(Modifier.height(8.dp))
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    items(recommendations, key = { it.hero.id }) { recommendation ->
+                    itemsIndexed(recommendations, key = { _, item -> item.hero.id }) { index, recommendation ->
                         val selected = recommendation.hero.id == focused?.hero?.id
                         Card(
                             modifier = Modifier.width(160.dp).clickable { focusedHeroId = recommendation.hero.id },
@@ -554,6 +586,7 @@ private fun ResultsScreen(
                                 Spacer(Modifier.height(8.dp))
                                 Text(recommendation.hero.name, fontWeight = FontWeight.Bold, maxLines = 1)
                                 Text("${recommendation.score}% fit", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                                Text(pickBadge(recommendation, recommendations, preferences), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black, maxLines = 1)
                                 if (selected) Text("VIEWING", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Black)
                             }
                         }
@@ -621,13 +654,13 @@ private fun SwitchCoachCard(
 }
 
 @Composable
-private fun BestPickCard(recommendation: Recommendation) {
+private fun BestPickCard(recommendation: Recommendation, badge: String) {
     Card(
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
         shape = RoundedCornerShape(24.dp)
     ) {
         Column(Modifier.padding(20.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-            Text("BEST PICK", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            Text(badge, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
             Row(verticalAlignment = Alignment.CenterVertically) {
                 HeroPortrait(recommendation.hero.id, recommendation.hero.name, Modifier.size(96.dp))
                 Spacer(Modifier.width(16.dp))
@@ -645,6 +678,66 @@ private fun BestPickCard(recommendation: Recommendation) {
             }
             if (recommendation.reasons.isEmpty()) {
                 Text(stringResource(R.string.balanced_fallback))
+            }
+        }
+    }
+}
+
+@Composable
+private fun ScoreBreakdownCard(recommendation: Recommendation) {
+    val breakdown = recommendation.breakdown
+    Card(shape = RoundedCornerShape(20.dp)) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("WHY THE SCORE MOVED", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            Text("Positive and negative context contributions behind the fit score.", style = MaterialTheme.typography.bodySmall)
+            BreakdownRow("Enemy matchups", breakdown.matchup)
+            BreakdownRow("Team synergy", breakdown.synergy)
+            BreakdownRow("Map fit", breakdown.map)
+            BreakdownRow("Your hero pool", breakdown.comfort)
+            BreakdownRow("Composition needs", breakdown.composition)
+            BreakdownRow("Rank and input", breakdown.rankAndInput)
+            BreakdownRow("Switching cost", breakdown.switching)
+        }
+    }
+}
+
+@Composable
+private fun BreakdownRow(label: String, value: Int) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Text(label, modifier = Modifier.width(132.dp), style = MaterialTheme.typography.bodySmall)
+        LinearProgressIndicator(
+            progress = { (abs(value).coerceAtMost(20) / 20f) },
+            modifier = Modifier.weight(1f).height(7.dp)
+        )
+        Spacer(Modifier.width(10.dp))
+        Text(if (value > 0) "+$value" else value.toString(), fontWeight = FontWeight.Bold, modifier = Modifier.width(34.dp))
+    }
+}
+
+@Composable
+private fun PlaybookCard(recommendation: Recommendation) {
+    Card(
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            Text("FIRST-FIGHT PLAYBOOK", style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Black)
+            recommendation.playTips.forEachIndexed { index, tip ->
+                Row(verticalAlignment = Alignment.Top) {
+                    Surface(shape = RoundedCornerShape(999.dp), color = MaterialTheme.colorScheme.secondary) {
+                        Text("${index + 1}", modifier = Modifier.padding(horizontal = 8.dp, vertical = 4.dp), color = MaterialTheme.colorScheme.onSecondary, fontWeight = FontWeight.Black)
+                    }
+                    Spacer(Modifier.width(10.dp))
+                    Text(tip, modifier = Modifier.weight(1f))
+                }
+            }
+            if (recommendation.playTips.isEmpty()) {
+                Text("Play around cover, coordinate cooldowns and focus the same target as your team.")
+            }
+            recommendation.riskNote?.let { risk ->
+                HorizontalDivider()
+                Text("WATCH OUT", color = MaterialTheme.colorScheme.error, fontWeight = FontWeight.Black)
+                Text(risk, style = MaterialTheme.typography.bodySmall)
             }
         }
     }
@@ -798,11 +891,62 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         }
 
         item {
+            SettingsCard(title = "Input platform", description = "Used as a small consistency adjustment, never as a replacement for matchup and comfort.") {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    InputPlatform.entries.forEach { input ->
+                        FilterChip(
+                            selected = settings.inputPlatform == input,
+                            onClick = { onSettingsChanged(settings.copy(inputPlatform = input)) },
+                            label = { Text(input.label) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SettingsCard(title = "Scan accuracy", description = settings.scanMode.description) {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(ScanMode.entries) { mode ->
+                        FilterChip(
+                            selected = settings.scanMode == mode,
+                            onClick = { onSettingsChanged(settings.copy(scanMode = mode)) },
+                            label = { Text(mode.label) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SettingsCard(title = "Scoreboard portrait side", description = "Auto checks both sides. Choose a side manually when your scoreboard layout is consistent for faster scanning.") {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(ScoreboardLayout.entries) { layout ->
+                        FilterChip(
+                            selected = settings.preferredLayout == layout,
+                            onClick = { onSettingsChanged(settings.copy(preferredLayout = layout)) },
+                            label = { Text(layout.displayName) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
             ToggleSetting(
                 title = "Automatic scan",
                 description = "Continuously analyze the newest camera frame and lock only after several frames agree.",
                 checked = settings.autoScan,
                 onCheckedChange = { onSettingsChanged(settings.copy(autoScan = it)) }
+            )
+        }
+
+        item {
+            ToggleSetting(
+                title = "Open results automatically",
+                description = "Jump to recommendations as soon as the lineup reaches the selected confidence mode.",
+                checked = settings.autoOpenResults,
+                onCheckedChange = { onSettingsChanged(settings.copy(autoOpenResults = it)) }
             )
         }
 
@@ -825,13 +969,13 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         }
 
         item {
-            SettingsCard(title = "Default zoom", description = "Start the camera between 1.0× and 3.0×.") {
+            SettingsCard(title = "Default zoom", description = "Start the camera between 1.0× and 5.0×. Pinch zoom remains available during scanning.") {
                 Text("${String.format(Locale.US, "%.1f", settings.defaultZoom)}×", fontWeight = FontWeight.Bold)
                 Slider(
                     value = settings.defaultZoom,
                     onValueChange = { onSettingsChanged(settings.copy(defaultZoom = it)) },
-                    valueRange = 1f..3f,
-                    steps = 7
+                    valueRange = 1f..5f,
+                    steps = 15
                 )
             }
         }
@@ -839,8 +983,8 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         item {
             SettingsCard(title = "Data and model", description = "Versioned components make future patch and model updates replaceable without redesigning the app.") {
                 Text("Hero data: ${HeroCatalog.DATA_VERSION}", fontWeight = FontWeight.Bold)
-                Text("Recommendation weights: V5 Supreme", fontWeight = FontWeight.Bold)
-                Text("Recognition: multi-frame template matcher · LiteRT model slot ready", fontWeight = FontWeight.Bold)
+                Text("Recommendation weights: V6 Explainable", fontWeight = FontWeight.Bold)
+                Text("Recognition: color + edge ensemble · multi-frame consensus · LiteRT model slot ready", fontWeight = FontWeight.Bold)
                 Text("OTA endpoint is not configured in this MVP; updates are bundled with source releases.", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -849,8 +993,11 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
             Card(shape = RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Privacy", fontWeight = FontWeight.Bold)
-                    Text("Camera frames are analyzed in memory. V5 Supreme does not upload scan snapshots or require an account.")
+                    Text("Camera frames are analyzed in memory. V6 does not upload scan snapshots or require an account.")
                     Text("History remains on this phone and can be cleared from the History tab.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedButton(onClick = { onSettingsChanged(settings.copy(onboardingComplete = false)) }) {
+                        Text("SHOW INTRO AGAIN")
+                    }
                 }
             }
         }
@@ -965,6 +1112,21 @@ private fun compositionCoverage(heroIds: List<String>): Int {
     return ((covered / valuableTraits.size.toFloat()) * 100).toInt().coerceIn(0, 100)
 }
 
+private fun pickBadge(
+    recommendation: Recommendation,
+    recommendations: List<Recommendation>,
+    preferences: Map<String, Int>
+): String {
+    val index = recommendations.indexOfFirst { it.hero.id == recommendation.hero.id }
+    val comfort = preferences[recommendation.hero.id] ?: 0
+    return when {
+        index == 0 -> "BEST OVERALL"
+        comfort >= 3 -> "COMFORT PICK"
+        Trait.SUSTAIN in recommendation.hero.traits || Trait.PROTECTION in recommendation.hero.traits || Trait.PEEL in recommendation.hero.traits -> "SAFER PICK"
+        else -> "ALTERNATIVE ${index + 1}"
+    }
+}
+
 private fun formatTimestamp(timestamp: Long): String =
     SimpleDateFormat("dd MMM · HH:mm", Locale.getDefault()).format(Date(timestamp))
 
@@ -996,6 +1158,8 @@ private fun reasonTitle(reason: Reason): String {
         is Reason.TeamNeed -> if (arabic) "حاجة الفريق" else "TEAM NEED"
         is Reason.SwitchCost -> if (arabic) "تنبيه التبديل" else "SWITCH WARNING"
         is Reason.RankFit -> if (arabic) "مناسب للرانك" else "RANK FIT"
+        is Reason.InputFit -> if (arabic) "مناسب لطريقة اللعب" else "INPUT FIT"
+        is Reason.ThreatFocus -> if (arabic) "التهديد الرئيسي" else "PRIMARY THREAT"
     }
 }
 
@@ -1009,6 +1173,8 @@ private fun reasonDetail(reason: Reason): String {
         is Reason.TeamNeed -> if (arabic) "يعالج نقص الفريق في ${needArabic(reason.need)}." else "It fills the team's need for ${reason.need}."
         is Reason.SwitchCost -> if (arabic) "انتظر استخدام الألتميت إن أمكن؛ التبديل الآن يهدر ${reason.ultimateCharge}%." else "Consider using your ultimate first; switching now gives up ${reason.ultimateCharge}% charge."
         is Reason.RankFit -> if (arabic) "أسلوبه وأدواته مناسبة غالباً لفئة ${reason.rankName}." else "Its consistency and utility fit the ${reason.rankName} rank profile."
+        is Reason.InputFit -> if (arabic) "أسلوبه ثابت ومناسب أكثر لإدخال ${reason.inputName}." else "Its consistency and control profile suit ${reason.inputName} input."
+        is Reason.ThreatFocus -> if (arabic) "ركز على ${reason.enemyName}؛ مستوى التهديد ${reason.severity}/5." else "Prioritize ${reason.enemyName}; estimated threat level ${reason.severity}/5."
     }
 }
 

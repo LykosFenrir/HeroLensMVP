@@ -3,7 +3,12 @@ package com.herolens.app.core
 import kotlin.math.roundToInt
 
 object RecommendationEngine {
-    private data class Contribution(val value: Double, val reason: Reason? = null)
+    private enum class Bucket { MATCHUP, SYNERGY, MAP, COMFORT, COMPOSITION, RANK_INPUT, SWITCHING, OTHER }
+    private data class Contribution(
+        val value: Double,
+        val reason: Reason? = null,
+        val bucket: Bucket = Bucket.OTHER
+    )
 
     private val directCounters: Map<String, Map<String, Double>> = mapOf(
         "dva" to mapOf("pharah" to 3.0, "echo" to 2.7, "bastion" to 2.2, "widowmaker" to 2.0, "ana" to 1.6),
@@ -64,10 +69,11 @@ object RecommendationEngine {
                                 enemyName = enemy.name,
                                 detail = counterExplanation(candidate, enemy),
                                 detailAr = counterExplanationAr(candidate, enemy)
-                            )
+                            ),
+                            Bucket.MATCHUP
                         )
                     } else {
-                        contributions += Contribution(matchup)
+                        contributions += Contribution(matchup, bucket = Bucket.MATCHUP)
                     }
                 }
 
@@ -83,18 +89,19 @@ object RecommendationEngine {
                                 allyName = ally.name,
                                 detail = synergyExplanation(candidate, ally),
                                 detailAr = synergyExplanationAr(candidate, ally)
-                            )
+                            ),
+                            Bucket.SYNERGY
                         )
                     } else {
-                        contributions += Contribution(synergy)
+                        contributions += Contribution(synergy, bucket = Bucket.SYNERGY)
                     }
                 }
 
                 val mapFit = mapFit(candidate, context.mapProfile) * 2.4
                 if (mapFit > 1.9) {
-                    contributions += Contribution(mapFit, Reason.MapFit(context.mapProfile.displayName))
+                    contributions += Contribution(mapFit, Reason.MapFit(context.mapProfile.displayName), Bucket.MAP)
                 } else {
-                    contributions += Contribution(mapFit)
+                    contributions += Contribution(mapFit, bucket = Bucket.MAP)
                 }
 
                 val preference = context.preferences[candidate.id] ?: 0
@@ -106,7 +113,7 @@ object RecommendationEngine {
                     else -> 0.0
                 }
                 if (preference > 0) {
-                    contributions += Contribution(comfortScore, Reason.Comfort(preference))
+                    contributions += Contribution(comfortScore, Reason.Comfort(preference), Bucket.COMFORT)
                 }
 
                 val teamNeed = teamNeed(candidate, allies, enemies)
@@ -116,10 +123,13 @@ object RecommendationEngine {
                 if (rankContribution != null) contributions += rankContribution
 
                 if (context.currentHeroId == candidate.id) {
-                    contributions += Contribution(3.0)
+                    contributions += Contribution(3.0, bucket = Bucket.SWITCHING)
                 } else if (context.currentHeroId != null && context.ultimateCharge >= 70) {
-                    contributions += Contribution(-7.0, Reason.SwitchCost(context.ultimateCharge))
+                    contributions += Contribution(-7.0, Reason.SwitchCost(context.ultimateCharge), Bucket.SWITCHING)
                 }
+
+                val inputContribution = inputFit(candidate, context.inputPlatform)
+                if (inputContribution != null) contributions += inputContribution
 
                 val raw = 50.0 + contributions.sumOf { it.value }
                 val score = raw.roundToInt().coerceIn(1, 99)
@@ -129,14 +139,30 @@ object RecommendationEngine {
                     .mapNotNull { it.reason }
                     .distinct()
                 val switchWarning = rankedReasons.filterIsInstance<Reason.SwitchCost>().firstOrNull()
-                val reasons = rankedReasons.filterNot { it is Reason.SwitchCost }.take(3).toMutableList().apply {
+                val reasons = rankedReasons.filterNot { it is Reason.SwitchCost }.take(5).toMutableList().apply {
                     if (switchWarning != null) {
-                        if (size == 3) removeAt(lastIndex)
+                        if (size == 5) removeAt(lastIndex)
                         add(switchWarning)
                     }
                 }
 
-                Recommendation(candidate, score, reasons)
+                val breakdown = ScoreBreakdown(
+                    matchup = bucketScore(contributions, Bucket.MATCHUP),
+                    synergy = bucketScore(contributions, Bucket.SYNERGY),
+                    map = bucketScore(contributions, Bucket.MAP),
+                    comfort = bucketScore(contributions, Bucket.COMFORT),
+                    composition = bucketScore(contributions, Bucket.COMPOSITION),
+                    rankAndInput = bucketScore(contributions, Bucket.RANK_INPUT),
+                    switching = bucketScore(contributions, Bucket.SWITCHING)
+                )
+                Recommendation(
+                    hero = candidate,
+                    score = score,
+                    reasons = reasons,
+                    breakdown = breakdown,
+                    playTips = playTips(candidate, allies, enemies),
+                    riskNote = riskNote(candidate, enemies)
+                )
             }
             .sortedWith(compareByDescending<Recommendation> { it.score }.thenBy { it.hero.name })
             .take(limit)
@@ -339,17 +365,17 @@ object RecommendationEngine {
         val enemyDive = enemies.count { Trait.DIVE in it.traits || Trait.MOBILITY in it.traits }
         val allyProtection = allies.count { Trait.PROTECTION in it.traits || Trait.PEEL in it.traits }
         if (enemyDive >= 2 && allyProtection == 0 && (Trait.PEEL in candidate.traits || Trait.ANTI_DIVE in candidate.traits)) {
-            return Contribution(4.0, Reason.TeamNeed("peel against enemy dive"))
+            return Contribution(4.0, Reason.TeamNeed("peel against enemy dive"), Bucket.COMPOSITION)
         }
 
         val allyBrawl = allies.count { Trait.BRAWL in it.traits || Trait.CLOSE_RANGE in it.traits }
         if (allyBrawl >= 2 && Trait.SPEED in candidate.traits) {
-            return Contribution(3.4, Reason.TeamNeed("speed for the brawl composition"))
+            return Contribution(3.4, Reason.TeamNeed("speed for the brawl composition"), Bucket.COMPOSITION)
         }
 
         val enemyProtection = enemies.count { Trait.PROTECTION in it.traits }
         if (enemyProtection >= 2 && Trait.SHIELD_BREAK in candidate.traits) {
-            return Contribution(3.2, Reason.TeamNeed("pressure into layered protection"))
+            return Contribution(3.2, Reason.TeamNeed("pressure into layered protection"), Bucket.COMPOSITION)
         }
 
         return null
@@ -381,9 +407,67 @@ object RecommendationEngine {
                 value
             }
         }
-        return if (score >= 0.8) Contribution(score * 2.0, Reason.RankFit(rank.lowercase().replaceFirstChar(Char::uppercase)))
-        else if (score != 0.0) Contribution(score * 2.0)
+        return if (score >= 0.8) Contribution(score * 2.0, Reason.RankFit(rank.lowercase().replaceFirstChar(Char::uppercase)), Bucket.RANK_INPUT)
+        else if (score != 0.0) Contribution(score * 2.0, bucket = Bucket.RANK_INPUT)
         else null
+    }
+
+    private fun bucketScore(contributions: List<Contribution>, bucket: Bucket): Int =
+        contributions.filter { it.bucket == bucket }.sumOf { it.value }.roundToInt().coerceIn(-20, 20)
+
+    private fun inputFit(candidate: Hero, inputPlatform: String): Contribution? {
+        val console = inputPlatform.equals("CONSOLE", ignoreCase = true)
+        val value = when {
+            console && Trait.SUSTAIN in candidate.traits -> 0.65
+            console && Trait.AREA_CONTROL in candidate.traits -> 0.55
+            console && Trait.SNIPER in candidate.traits && Trait.MOBILITY !in candidate.traits -> -0.35
+            !console && Trait.HITSCAN in candidate.traits -> 0.35
+            !console && Trait.MOBILITY in candidate.traits -> 0.25
+            else -> 0.0
+        }
+        return when {
+            value >= 0.6 -> Contribution(value * 1.8, Reason.InputFit(if (console) "Console" else "PC"), Bucket.RANK_INPUT)
+            value != 0.0 -> Contribution(value * 1.8, bucket = Bucket.RANK_INPUT)
+            else -> null
+        }
+    }
+
+    private fun playTips(candidate: Hero, allies: List<Hero>, enemies: List<Hero>): List<String> = buildList {
+        val airborne = enemies.firstOrNull { Trait.VERTICALITY in it.traits }
+        val diver = enemies.firstOrNull { Trait.DIVE in it.traits || Trait.MOBILITY in it.traits }
+        val sniper = enemies.firstOrNull { Trait.SNIPER in it.traits || Trait.LONG_RANGE in it.traits }
+        when {
+            airborne != null && (Trait.HITSCAN in candidate.traits || Trait.ANTI_AIR in candidate.traits) ->
+                add("Hold a clean sightline on ${airborne.name}; pressure during exposed flight instead of chasing through cover.")
+            diver != null && (Trait.PEEL in candidate.traits || Trait.ANTI_DIVE in candidate.traits) ->
+                add("Save one defensive cooldown for ${diver.name}'s engage and punish the exit, not only the entry.")
+            sniper != null && Trait.DIVE in candidate.traits ->
+                add("Use cover to close distance, then force ${sniper.name} off the angle before committing deeper.")
+        }
+        if (Trait.BRAWL in candidate.traits || Trait.CLOSE_RANGE in candidate.traits) {
+            add("Fight from cover and corners so your team reaches effective range without spending every resource first.")
+        } else if (Trait.POKE in candidate.traits || Trait.LONG_RANGE in candidate.traits) {
+            add("Create crossfire from a safe angle and rotate before the enemy closes the distance.")
+        }
+        val matchingAlly = allies.firstOrNull { genericSynergy(candidate, it) > 0.8 }
+        if (matchingAlly != null) {
+            add("Time your pressure with ${matchingAlly.name}; the pairing is strongest when both commit to the same target or space.")
+        }
+        if (Trait.MOBILITY in candidate.traits) {
+            add("Keep one movement option for disengaging after the first cooldown trade.")
+        } else if (Trait.PROTECTION in candidate.traits || Trait.SUSTAIN in candidate.traits) {
+            add("Anchor near cover and preserve defensive resources for the enemy's strongest burst window.")
+        }
+    }.distinct().take(3)
+
+    private fun riskNote(candidate: Hero, enemies: List<Hero>): String? {
+        val hardThreat = enemies.maxByOrNull { enemy ->
+            (directCounters[enemy.id]?.get(candidate.id) ?: 0.0) + genericCounter(enemy, candidate)
+        } ?: return null
+        val severity = (directCounters[hardThreat.id]?.get(candidate.id) ?: 0.0) + genericCounter(hardThreat, candidate)
+        return if (severity >= 2.2) {
+            "Watch ${hardThreat.name}: it can punish this pick if you lose cover, range control or key cooldowns."
+        } else null
     }
 
 }

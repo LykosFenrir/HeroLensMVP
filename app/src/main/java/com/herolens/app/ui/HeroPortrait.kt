@@ -64,7 +64,7 @@ private object PortraitLoader {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.5")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.6")
         return try {
             connection.inputStream.use { input ->
                 destination.outputStream().use { output -> input.copyTo(output) }

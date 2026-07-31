@@ -1,4 +1,4 @@
-const CACHE = 'herolens-v5-supreme-shell-2';
+const CACHE = 'herolens-v6-coach-shell-1';
 const SHELL = ['./', './index.html', './manifest.webmanifest', './icon-192.png', './icon-512.png', './privacy.html'];
 
 self.addEventListener('install', event => {

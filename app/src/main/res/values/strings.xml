@@ -62,4 +62,5 @@
     <string name="pause">Pause</string>
     <string name="rescan">Rescan</string>
     <string name="use_now">Use now</string>
+    <string name="tap_to_focus_hint">Tap the scoreboard area to focus. Pinch to zoom and adjust exposure if needed.</string>
 </resources>

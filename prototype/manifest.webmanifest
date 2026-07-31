@@ -1,7 +1,7 @@
 {
-  "name": "HeroLens V5 Supreme",
+  "name": "HeroLens V6 Coach",
   "short_name": "HeroLens",
-  "description": "Unofficial live scoreboard hero-pick coach with explainable synergy and counter recommendations.",
+  "description": "Unofficial live scoreboard coach with adaptive scanning, explainable counter and synergy recommendations, switch timing and first-fight playbooks.",
   "start_url": "./index.html#scanSection",
   "scope": "./",
   "display": "standalone",

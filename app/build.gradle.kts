@@ -12,8 +12,8 @@ android {
         applicationId = "com.herolens.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 8
-        versionName = "0.5.3"
+        versionCode = 10
+        versionName = "0.6.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true

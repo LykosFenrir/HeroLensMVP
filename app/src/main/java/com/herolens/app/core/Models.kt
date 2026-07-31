@@ -53,7 +53,8 @@ data class MatchContext(
     val preferences: Map<String, Int>,
     val currentHeroId: String? = null,
     val ultimateCharge: Int = 0,
-    val rank: String = "UNRANKED"
+    val rank: String = "UNRANKED",
+    val inputPlatform: String = "PC"
 )
 
 sealed interface Reason {
@@ -68,15 +69,31 @@ sealed interface Reason {
         val detail: String,
         val detailAr: String
     ) : Reason
+
     data class MapFit(val mapName: String) : Reason
     data class Comfort(val level: Int) : Reason
     data class TeamNeed(val need: String) : Reason
     data class SwitchCost(val ultimateCharge: Int) : Reason
     data class RankFit(val rankName: String) : Reason
+    data class InputFit(val inputName: String) : Reason
+    data class ThreatFocus(val enemyName: String, val severity: Int) : Reason
 }
+
+data class ScoreBreakdown(
+    val matchup: Int = 0,
+    val synergy: Int = 0,
+    val map: Int = 0,
+    val comfort: Int = 0,
+    val composition: Int = 0,
+    val rankAndInput: Int = 0,
+    val switching: Int = 0
+)
 
 data class Recommendation(
     val hero: Hero,
     val score: Int,
-    val reasons: List<Reason>
+    val reasons: List<Reason>,
+    val breakdown: ScoreBreakdown = ScoreBreakdown(),
+    val playTips: List<String> = emptyList(),
+    val riskNote: String? = null
 )

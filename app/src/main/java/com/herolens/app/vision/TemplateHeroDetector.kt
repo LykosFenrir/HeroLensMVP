@@ -69,19 +69,25 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
         val detections = ScoreboardSlots.slots(layout).mapIndexed { index, (team, rect) ->
             onProgress("Recognizing ${index + 1}/10")
-            val crop = SignatureMath.crop(frame, rect)
-            val signature = SignatureMath.signature(crop.rgba, crop.width, crop.height)
+            val signatures = ScoreboardSlots.jittered(rect).map { candidateRect ->
+                val crop = SignatureMath.crop(frame, candidateRect)
+                SignatureMath.signature(crop.rgba, crop.width, crop.height)
+            }
             val used = usedByTeam.getOrPut(team) { mutableSetOf() }
             val ranked = templates.entries
-                .map { (heroId, template) -> heroId to SignatureMath.similarity(signature, template) }
+                .map { (heroId, template) ->
+                    heroId to signatures.maxOf { signature -> SignatureMath.similarity(signature, template) }
+                }
                 .sortedByDescending { it.second }
             val available = ranked.filterNot { it.first in used }.ifEmpty { ranked }
             val best = available.first()
             val second = available.getOrNull(1)?.second ?: -1f
+            val third = available.getOrNull(2)?.second ?: -1f
             val raw = ((best.second + 1f) / 2f).coerceIn(0f, 1f)
             val margin = (best.second - second).coerceAtLeast(0f)
-            val confidence = (raw * 0.68f + margin * 1.05f).coerceIn(0f, 0.99f)
-            val accepted = confidence >= 0.45f
+            val separation = (best.second - third).coerceAtLeast(0f)
+            val confidence = (raw * 0.62f + margin * 0.90f + separation * 0.36f).coerceIn(0f, 0.99f)
+            val accepted = confidence >= 0.44f && margin >= 0.018f
             if (accepted) used += best.first
             HeroDetection(
                 heroId = best.first.takeIf { accepted },
