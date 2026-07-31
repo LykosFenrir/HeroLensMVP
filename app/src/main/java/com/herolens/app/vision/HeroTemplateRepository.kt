@@ -76,7 +76,7 @@ class HeroTemplateRepository(private val context: Context) {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6.2")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.6.3")
         val temporary = File(destination.parentFile, "${destination.name}.part")
         return try {
             connection.inputStream.use { input ->
@@ -132,7 +132,15 @@ class HeroTemplateRepository(private val context: Context) {
         maxX = (maxX + padX).coerceAtMost(width - 1)
         maxY = (maxY + padY).coerceAtMost(height - 1)
 
-        fun signatureFor(left: Int, top: Int, right: Int, bottom: Int): ImageSignature {
+        fun signatureFor(
+            left: Int,
+            top: Int,
+            right: Int,
+            bottom: Int,
+            backgroundRed: Int = 128,
+            backgroundGreen: Int = 128,
+            backgroundBlue: Int = 128
+        ): ImageSignature {
             val cropWidth = (right - left + 1).coerceAtLeast(1)
             val cropHeight = (bottom - top + 1).coerceAtLeast(1)
             val rgba = ByteArray(cropWidth * cropHeight * 4)
@@ -144,9 +152,9 @@ class HeroTemplateRepository(private val context: Context) {
                     val red = (color shr 16) and 0xff
                     val green = (color shr 8) and 0xff
                     val blue = color and 0xff
-                    rgba[destination] = ((red * alpha + 128 * (255 - alpha)) / 255).toByte()
-                    rgba[destination + 1] = ((green * alpha + 128 * (255 - alpha)) / 255).toByte()
-                    rgba[destination + 2] = ((blue * alpha + 128 * (255 - alpha)) / 255).toByte()
+                    rgba[destination] = ((red * alpha + backgroundRed * (255 - alpha)) / 255).toByte()
+                    rgba[destination + 1] = ((green * alpha + backgroundGreen * (255 - alpha)) / 255).toByte()
+                    rgba[destination + 2] = ((blue * alpha + backgroundBlue * (255 - alpha)) / 255).toByte()
                     rgba[destination + 3] = 0xff.toByte()
                     destination += 4
                 }
@@ -163,16 +171,29 @@ class HeroTemplateRepository(private val context: Context) {
         val squareBottom = (squareTop + squareSize - 1).coerceAtMost(maxY)
         val upperBottom = (minY + fullHeight * 0.84f).toInt().coerceIn(minY, maxY)
         val insetX = (fullWidth * 0.06f).toInt()
+        val insetLeft = (minX + insetX).coerceAtMost(maxX)
+        val insetRight = (maxX - insetX).coerceAtLeast(minX)
 
+        // Scoreboard portraits are rendered over strong cyan/blue or red team panels,
+        // while the downloaded portrait assets often contain transparency. Include
+        // representative team-colour composites so luminance/edge matching does not
+        // compare a grey template background with a saturated TV background.
+        val neutral = intArrayOf(128, 128, 128)
+        val allyBlue = intArrayOf(35, 151, 216)
+        val enemyRed = intArrayOf(190, 48, 61)
         return listOf(
-            signatureFor(minX, minY, maxX, maxY),
-            signatureFor(squareLeft, squareTop, squareRight, squareBottom),
-            signatureFor((minX + insetX).coerceAtMost(maxX), minY, (maxX - insetX).coerceAtLeast(minX), upperBottom)
+            signatureFor(minX, minY, maxX, maxY, neutral[0], neutral[1], neutral[2]),
+            signatureFor(squareLeft, squareTop, squareRight, squareBottom, neutral[0], neutral[1], neutral[2]),
+            signatureFor(insetLeft, minY, insetRight, upperBottom, neutral[0], neutral[1], neutral[2]),
+            signatureFor(squareLeft, squareTop, squareRight, squareBottom, allyBlue[0], allyBlue[1], allyBlue[2]),
+            signatureFor(insetLeft, minY, insetRight, upperBottom, allyBlue[0], allyBlue[1], allyBlue[2]),
+            signatureFor(squareLeft, squareTop, squareRight, squareBottom, enemyRed[0], enemyRed[1], enemyRed[2]),
+            signatureFor(insetLeft, minY, insetRight, upperBottom, enemyRed[0], enemyRed[1], enemyRed[2])
         )
     }
 
     private fun signatureCacheFile(): File =
-        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_2-multicrop.bin")
+        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_3-team-backgrounds.bin")
 
     private fun readSignatureCache(): Map<String, List<ImageSignature>>? {
         val file = signatureCacheFile()
@@ -184,7 +205,7 @@ class HeroTemplateRepository(private val context: Context) {
                 buildMap {
                     repeat(count) {
                         val heroId = input.readUTF()
-                        val variantCount = input.readInt().coerceIn(1, 8)
+                        val variantCount = input.readInt().coerceIn(1, 12)
                         val variants = List(variantCount) {
                             val luminance = input.readFloatArray()
                             val edges = input.readFloatArray()
@@ -238,7 +259,7 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_2_MULTICROP"
+        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_3_TEAM_BACKGROUNDS"
     }
 }
 

@@ -58,8 +58,8 @@ object ScoreboardSlots {
         require(teamSize in 5..6)
         // Three compact profiles are enough after panel localization. Older builds
         // evaluated 32 full combinations per frame, which was too slow on phones.
-        val portraitOffsets = listOf(0.038f, 0.070f)
-        val widthScales = listOf(0.090f)
+        val portraitOffsets = listOf(0.030f, 0.070f, 0.110f)
+        val widthScales = listOf(0.095f)
         return buildList {
             portraitOffsets.forEach { offset ->
                 widthScales.forEach { widthScale ->

@@ -1,8 +1,8 @@
-# HeroLens V6.2 Coach
+# HeroLens V6.3 Validated Scanner
 
 HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a scoreboard with the rear camera, recommend three heroes and explain the enemy counters, ally synergies, map fit, player-comfort impact and switch timing behind every suggestion.
 
-## What V6.2 includes
+## What V6.3 includes
 
 - Fast, Balanced and Accurate live-scan modes.
 - Automatic or fixed scoreboard portrait-side detection.
@@ -15,7 +15,7 @@ HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a
 - Onboarding, richer scan history and improved mobile layout.
 - Matching V6 browser/PWA prototype.
 
-See `V6_RELEASE_NOTES.md` and `V6_2_SCANNER_REBUILD.md` for the complete list.
+See `V6_RELEASE_NOTES.md`, `V6_2_SCANNER_REBUILD.md`, `V6_3_VALIDATED_SCANNER.md` and `docs/V6_3_SCANNER_TEST_REPORT.md` for details.
 
 
 ### V6.2 scanner rebuild
@@ -25,6 +25,16 @@ See `V6_RELEASE_NOTES.md` and `V6_2_SCANNER_REBUILD.md` for the complete list.
 - Portrait and both landscape rotations while scanning.
 - Dynamic 5v5/6v6 hero slots aligned to the detected TV scoreboard.
 - Faster multi-crop portrait matching and a fresh V6.2 detector cache.
+
+### V6.3 validated scanner correction
+
+- Adaptive CameraX packed-byte decoding for current RGBA and legacy ARGB camera streams.
+- Scoreboard locator validated against supplied Hisense TV and ASUS laptop captures.
+- Correct distinction between full scoreboards, incomplete lobbies and non-scoreboard menus.
+- Team-colour portrait templates for cyan/blue and red scoreboard backgrounds.
+- Wider portrait viewfinder, explicit zoom presets and live detector diagnostics.
+- Auto-frame can use a partially visible team panel while waiting for the full scoreboard.
+- Manual zoom remains in control for four seconds before auto-frame can adjust it.
 
 ## Build the Android APK with GitHub Actions
 

@@ -44,6 +44,18 @@ data class ScoreboardRegion(
         )
 }
 
+
+
+enum class ScoreboardSearchState { FOUND, INCOMPLETE, NOT_FOUND }
+
+data class ScoreboardSearchResult(
+    val region: ScoreboardRegion?,
+    val framingBounds: NormalizedRect?,
+    val confidence: Float,
+    val state: ScoreboardSearchState,
+    val message: String
+)
+
 data class DetectionResult(
     val detections: List<HeroDetection>,
     val templatesLoaded: Int,

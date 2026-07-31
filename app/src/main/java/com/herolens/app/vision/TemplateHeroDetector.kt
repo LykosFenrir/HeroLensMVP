@@ -3,7 +3,7 @@ package com.herolens.app.vision
 import android.content.Context
 
 /**
- * Experimental on-device detector. V6.2 first locates the actual blue/red scoreboard
+ * Experimental on-device detector. V6.3 first locates the actual blue/red scoreboard
  * panels, then compares only the portrait cells. This is substantially more robust
  * than fixed screen coordinates and supports both 5v5 and 6v6 scoreboards.
  */
@@ -82,6 +82,25 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         } else {
             detectLegacy(frame, layout, onProgress)
         }
+    }
+
+    suspend fun detectLocated(
+        frame: ScoreboardFrame,
+        region: ScoreboardRegion,
+        layout: ScoreboardLayout,
+        onProgress: (String) -> Unit = {}
+    ): DetectionResult {
+        ensureTemplates(onProgress)
+        if (layout == ScoreboardLayout.AUTO) return detectAuto(frame, onProgress, region).result
+        return listOf(5, 6)
+            .map { teamSize -> detectLocalized(frame, region, layout, teamSize, onProgress) }
+            .maxByOrNull(::resultQuality)
+            ?: DetectionResult(
+                detections = placeholderDetections(5),
+                templatesLoaded = cachedTemplates.orEmpty().size,
+                scoreboardRegion = region,
+                teamSize = 5
+            )
     }
 
     private suspend fun ensureTemplates(onProgress: (String) -> Unit) {
@@ -187,7 +206,10 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val margin = (best.second - second).coerceAtLeast(0f)
             val separation = (best.second - third).coerceAtLeast(0f)
             val confidence = (raw * 0.64f + margin * 1.18f + separation * 0.36f).coerceIn(0f, 0.99f)
-            val accepted = confidence >= 0.34f && raw >= 0.46f && margin >= 0.004f
+            // Multi-frame stabilization is the final false-positive guard. Keep the
+            // per-frame gate permissive enough for camera blur, TV colour casts and
+            // small laptop portraits, then require repeated agreement before import.
+            val accepted = confidence >= 0.27f && raw >= 0.41f && margin >= 0.0015f
             if (accepted) used += best.first
             HeroDetection(
                 heroId = best.first.takeIf { accepted },
