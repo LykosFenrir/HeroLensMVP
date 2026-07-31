@@ -1,0 +1,24 @@
+{
+  "model": "MobileNetV3-Small",
+  "classes": 53,
+  "hero_classes": 52,
+  "synthetic_train_images": 1260,
+  "scoreboard_crop_train_images": 1872,
+  "real_train_images": 0,
+  "validation_images": 315,
+  "scoreboard_crop_validation_images": 312,
+  "best_synthetic_validation_accuracy": 0.939683,
+  "best_scoreboard_crop_validation_accuracy": 0.894231,
+  "best_model_selection_score": 0.914684,
+  "scoreboard_benchmark_scenes": 600,
+  "scoreboard_benchmark_crops": 6000,
+  "scoreboard_benchmark_accuracy": 0.801,
+  "input_shape": [
+    "N",
+    3,
+    96,
+    96
+  ],
+  "elapsed_seconds": 282.91,
+  "seed": 20260731
+}
