@@ -2,8 +2,10 @@
 <data-extraction-rules>
     <cloud-backup>
         <exclude domain="sharedpref" path="sensitive.xml" />
+        <exclude domain="file" path="training_samples/" />
     </cloud-backup>
     <device-transfer>
         <exclude domain="sharedpref" path="sensitive.xml" />
+        <exclude domain="file" path="training_samples/" />
     </device-transfer>
 </data-extraction-rules>

@@ -14,6 +14,7 @@ import android.util.Size as AndroidSize
 import android.view.GestureDetector
 import android.view.MotionEvent
 import android.view.ScaleGestureDetector
+import android.view.Surface as AndroidSurface
 import android.view.WindowManager
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
@@ -45,11 +46,11 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material3.Button
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
@@ -59,14 +60,13 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Slider
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
-import androidx.compose.runtime.key
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -74,6 +74,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.geometry.CornerRadius
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
@@ -92,19 +93,24 @@ import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.herolens.app.R
 import com.herolens.app.core.Hero
 import com.herolens.app.core.HeroCatalog
+import com.herolens.app.data.DatasetCollector
+import com.herolens.app.data.DisplayType
+import com.herolens.app.data.InputPlatform
 import com.herolens.app.data.ScanMode
 import com.herolens.app.vision.AutoDetectionResult
+import com.herolens.app.vision.BurstScanSession
 import com.herolens.app.vision.DetectionResult
 import com.herolens.app.vision.FrameQualityEvaluator
 import com.herolens.app.vision.HeroCandidate
 import com.herolens.app.vision.HeroDetection
-import com.herolens.app.vision.LiveScanStabilizer
 import com.herolens.app.vision.NormalizedRect
 import com.herolens.app.vision.QualityHint
+import com.herolens.app.vision.ScoreboardFrame
+import com.herolens.app.vision.ScoreboardLayout
 import com.herolens.app.vision.ScoreboardRegion
 import com.herolens.app.vision.ScoreboardSearchState
-import com.herolens.app.vision.ScoreboardLayout
 import com.herolens.app.vision.ScoreboardLocator
+import com.herolens.app.vision.StableDetectionSnapshot
 import com.herolens.app.vision.TeamSide
 import com.herolens.app.vision.TemplateHeroDetector
 import com.herolens.app.vision.toScoreboardFrame
@@ -112,13 +118,22 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.util.Locale
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import kotlin.math.roundToInt
 
+private enum class ScanPhase { AIMING, CAPTURING, REVIEW }
+
+private data class CapturedFrameCandidate(
+    val frame: ScoreboardFrame,
+    val region: ScoreboardRegion,
+    val score: Float
+)
 
 @Composable
 fun CameraScanScreen(
@@ -130,6 +145,9 @@ fun CameraScanScreen(
     autoZoom: Boolean,
     scanMode: ScanMode,
     preferredLayout: ScoreboardLayout,
+    collectTrainingData: Boolean,
+    inputPlatform: InputPlatform,
+    displayType: DisplayType,
     onClose: () -> Unit,
     onUseDetections: (
         allies: List<String>,
@@ -148,21 +166,19 @@ fun CameraScanScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
-    val detector = remember { TemplateHeroDetector(context) }
-    val stabilizer = remember(scanMode) {
-        LiveScanStabilizer(
-            windowSize = scanMode.windowSize,
-            minimumVotes = scanMode.minimumVotes,
-            minimumAverageConfidence = scanMode.minimumConfidence
-        )
-    }
+    val detector = remember { TemplateHeroDetector(context.applicationContext) }
+    val datasetCollector = remember { DatasetCollector(context.applicationContext) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
+
     val busy = remember { AtomicBoolean(false) }
-    val liveEnabledRef = remember { AtomicBoolean(true) }
-    val singleScanRequested = remember { AtomicBoolean(false) }
-    val lastAnalysisAt = remember { AtomicLong(0L) }
+    val phaseRef = remember { AtomicReference(ScanPhase.AIMING) }
     val cameraRef = remember { AtomicReference<Camera?>(null) }
     val zoomRatioRef = remember { AtomicReference(defaultZoom.coerceAtLeast(1f)) }
+    val burstSessionRef = remember { AtomicReference<BurstScanSession?>(null) }
+    val bestFrameRef = remember { AtomicReference<CapturedFrameCandidate?>(null) }
+    val lastAnalysisAt = remember { AtomicLong(0L) }
+    val burstDeadline = remember { AtomicLong(0L) }
+    val autoStartVotes = remember { AtomicInteger(0) }
     val lastAutoZoomAt = remember { AtomicLong(0L) }
 
     var permissionGranted by remember {
@@ -173,14 +189,16 @@ fun CameraScanScreen(
     }
 
     var cameraProvider by remember { mutableStateOf<ProcessCameraProvider?>(null) }
-    var liveEnabled by remember { mutableStateOf(true) }
+    var phase by remember { mutableStateOf(ScanPhase.AIMING) }
     var templatesReady by remember { mutableStateOf(false) }
     var templatesLoadedCount by remember { mutableIntStateOf(0) }
-    var status by remember { mutableStateOf(context.getString(R.string.preparing_live_scan)) }
+    var status by remember { mutableStateOf("Aim at the blue and red scoreboard panels") }
     var warning by remember { mutableStateOf<String?>(null) }
+    var datasetMessage by remember { mutableStateOf<String?>(null) }
     var fatalError by remember { mutableStateOf<String?>(null) }
-    var detections by remember { mutableStateOf<List<HeroDetection>>(emptyList()) }
+    var detections by remember { mutableStateOf(placeholderDetections(5)) }
     var selectedLayout by remember { mutableStateOf(preferredLayout) }
+    var resolvedLayout by remember { mutableStateOf(preferredLayout) }
     var frameBrightness by remember { mutableStateOf(0f) }
     var frameSharpness by remember { mutableStateOf(0f) }
     var qualityHint by remember { mutableStateOf(QualityHint.GOOD) }
@@ -189,14 +207,13 @@ fun CameraScanScreen(
     var exposureMax by remember { mutableIntStateOf(0) }
     var torchOn by remember { mutableStateOf(false) }
     var stableSlots by remember { mutableIntStateOf(0) }
-    var framesObserved by remember { mutableIntStateOf(0) }
+    var burstFrames by remember { mutableIntStateOf(0) }
+    var burstTarget by remember { mutableIntStateOf(scanMode.burstFrames) }
     var readyToImport by remember { mutableStateOf(false) }
-    var imported by remember { mutableStateOf(false) }
     var correctionIndex by remember { mutableStateOf<Int?>(null) }
     var ownAllySlot by remember { mutableStateOf<Int?>(null) }
     var zoomRatio by remember { mutableStateOf(defaultZoom.coerceAtLeast(1f)) }
     var maxZoomRatio by remember { mutableStateOf(1f) }
-    var hapticSent by remember { mutableStateOf(false) }
     var scoreboardRegion by remember { mutableStateOf<ScoreboardRegion?>(null) }
     var framingBounds by remember { mutableStateOf<NormalizedRect?>(null) }
     var locatorState by remember { mutableStateOf(ScoreboardSearchState.NOT_FOUND) }
@@ -204,52 +221,40 @@ fun CameraScanScreen(
     var frameDimensions by remember { mutableStateOf("—") }
     var overlaySlots by remember { mutableStateOf<List<Pair<TeamSide, NormalizedRect>>>(emptyList()) }
     var detectedTeamSize by remember { mutableIntStateOf(5) }
+    var capturedFrame by remember { mutableStateOf<ScoreboardFrame?>(null) }
+    var capturedRegion by remember { mutableStateOf<ScoreboardRegion?>(null) }
+    var hapticSent by remember { mutableStateOf(false) }
 
     fun closeScanner() {
         activity?.requestedOrientation = originalRequestedOrientation
         onClose()
     }
 
-    fun applyZoom(requested: Float, manual: Boolean = true) {
-        val camera = cameraRef.get()
-        if (camera == null) {
+    fun applyZoom(requested: Float) {
+        val camera = cameraRef.get() ?: run {
             status = "Camera is still starting"
             return
         }
         val state = camera.cameraInfo.zoomState.value
-        val minZoom = state?.minZoomRatio ?: 1f
-        val maxZoom = state?.maxZoomRatio ?: maxZoomRatio.coerceAtLeast(1f)
-        if (maxZoom <= minZoom + 0.01f) {
-            status = "This camera reports no optical/digital zoom range"
-            return
-        }
-        val target = requested.coerceIn(minZoom, maxZoom)
+        val target = requested.coerceIn(state?.minZoomRatio ?: 1f, state?.maxZoomRatio ?: maxZoomRatio.coerceAtLeast(1f))
         zoomRatioRef.set(target)
         zoomRatio = target
-        if (manual) lastAutoZoomAt.set(System.currentTimeMillis())
-        camera.cameraControl.setZoomRatio(target).addListener(
-            { /* ZoomState observer is the source of truth. */ },
-            ContextCompat.getMainExecutor(context)
-        )
+        camera.cameraControl.setZoomRatio(target)
     }
 
     fun frameScoreboard() {
         val bounds = framingBounds ?: scoreboardRegion?.bounds
         if (bounds == null) {
             applyZoom(zoomRatioRef.get() + 0.5f)
-            status = "Zooming in — center both blue and red panels"
+            status = "Zooming in — keep both team panels visible"
             return
         }
         val scale = minOf(
-            0.84f / bounds.width.coerceAtLeast(0.01f),
-            0.78f / bounds.height.coerceAtLeast(0.01f)
-        ).coerceIn(0.70f, 3.2f)
+            0.80f / bounds.width.coerceAtLeast(0.01f),
+            0.76f / bounds.height.coerceAtLeast(0.01f)
+        ).coerceIn(0.72f, 2.7f)
         applyZoom(zoomRatioRef.get() * scale)
-        status = if (locatorState == ScoreboardSearchState.FOUND) {
-            "Scoreboard framed"
-        } else {
-            "Framed visible team panel — waiting for both teams"
-        }
+        status = "Scoreboard framed"
     }
 
     fun averageConfidence(): Int {
@@ -258,84 +263,153 @@ fun CameraScanScreen(
         return (accepted.map { it.confidence }.average() * 100).roundToInt().coerceIn(0, 99)
     }
 
-    fun importStableTeams() {
-        if (imported || !readyToImport) return
-        val allyDetections = detections.filter { it.team == TeamSide.ALLY }.sortedBy { it.slot }
-        val currentHero = ownAllySlot?.let { selectedSlot ->
-            allyDetections.firstOrNull { it.slot == selectedSlot }?.heroId
+    fun enterReview(snapshot: StableDetectionSnapshot?) {
+        val best = bestFrameRef.get()
+        capturedFrame = best?.frame
+        capturedRegion = best?.region ?: snapshot?.scoreboardRegion ?: scoreboardRegion
+        if (snapshot != null) {
+            detections = snapshot.detections
+            stableSlots = snapshot.stableSlots
+            detectedTeamSize = snapshot.teamSize
+            overlaySlots = snapshot.slotRects
+            scoreboardRegion = snapshot.scoreboardRegion ?: scoreboardRegion
+            readyToImport = snapshot.ready
         }
+        phase = ScanPhase.REVIEW
+        phaseRef.set(ScanPhase.REVIEW)
+        status = when {
+            readyToImport -> "Scan complete — review the lineup"
+            stableSlots > 0 -> "Partial scan — correct uncertain slots"
+            else -> "No confident heroes — tap each slot to select manually"
+        }
+        if (hapticFeedback && !hapticSent) {
+            hapticSent = true
+            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+        }
+    }
+
+    fun startBurst() {
+        if (!templatesReady) {
+            warning = "Hero references are still preparing. Keep internet enabled on first use."
+            return
+        }
+        if (locatorState != ScoreboardSearchState.FOUND || scoreboardRegion == null) {
+            warning = "Center the complete blue and red scoreboard panels, then tap Scan."
+            return
+        }
+        warning = null
+        datasetMessage = null
+        hapticSent = false
+        burstTarget = scanMode.burstFrames
+        burstFrames = 0
+        stableSlots = 0
+        readyToImport = false
+        overlaySlots = emptyList()
+        detections = placeholderDetections(detectedTeamSize)
+        bestFrameRef.set(null)
+        val session = BurstScanSession(
+            targetFrames = scanMode.burstFrames,
+            minimumVotes = scanMode.minimumVotes,
+            minimumAverageConfidence = scanMode.minimumConfidence
+        )
+        burstSessionRef.set(session)
+        burstDeadline.set(System.currentTimeMillis() + 6_000L)
+        phase = ScanPhase.CAPTURING
+        phaseRef.set(ScanPhase.CAPTURING)
+        status = "Scanning — hold steady"
+    }
+
+    fun scanAgain() {
+        phase = ScanPhase.AIMING
+        phaseRef.set(ScanPhase.AIMING)
+        burstSessionRef.set(null)
+        bestFrameRef.set(null)
+        capturedFrame = null
+        capturedRegion = null
+        burstFrames = 0
+        stableSlots = 0
+        readyToImport = false
+        overlaySlots = emptyList()
+        detections = placeholderDetections(5)
+        detectedTeamSize = 5
+        status = "Aim at the blue and red scoreboard panels"
+        warning = null
+    }
+
+    fun useReviewedTeams() {
+        val allyDetections = detections.filter { it.team == TeamSide.ALLY }.sortedBy { it.slot }
+        val enemyDetections = detections.filter { it.team == TeamSide.ENEMY }.sortedBy { it.slot }
+        val currentHero = ownAllySlot?.let { selected -> allyDetections.firstOrNull { it.slot == selected }?.heroId }
         val allies = allyDetections
             .filterNot { ownAllySlot != null && it.slot == ownAllySlot }
             .mapNotNull { it.heroId }
             .distinct()
-            .take((detectedTeamSize - 1).coerceAtLeast(4))
-        val enemies = detections.filter { it.team == TeamSide.ENEMY }
-            .sortedBy { it.slot }
-            .mapNotNull { it.heroId }
-            .distinct()
-            .take(detectedTeamSize)
-        if (enemies.size == detectedTeamSize && allies.size >= detectedTeamSize - 1) {
-            imported = true
-            onUseDetections(allies, enemies, currentHero, averageConfidence())
+            .take(if (ownAllySlot == null) detectedTeamSize else (detectedTeamSize - 1).coerceAtLeast(4))
+        val enemies = enemyDetections.mapNotNull { it.heroId }.distinct().take(detectedTeamSize)
+        if (enemies.size < detectedTeamSize || allies.size < detectedTeamSize - 1) {
+            warning = "Correct the unknown slots before using the lineup. Your own ally row can remain optional."
+            return
         }
+        val confidence = averageConfidence()
+        if (collectTrainingData) {
+            val frame = capturedFrame
+            val region = capturedRegion
+            if (frame != null && region != null) {
+                status = "Saving reviewed training sample…"
+                scope.launch {
+                    val result = withContext(Dispatchers.IO) {
+                        datasetCollector.saveReviewedSample(
+                            frame = frame,
+                            region = region,
+                            detections = detections,
+                            layout = resolvedLayout,
+                            platform = inputPlatform,
+                            displayType = displayType,
+                            scanConfidence = confidence
+                        )
+                    }
+                    datasetMessage = if (result.saved) "Reviewed sample saved locally for future training" else result.message
+                    onUseDetections(allies, enemies, currentHero, confidence)
+                }
+                return
+            }
+        }
+        onUseDetections(allies, enemies, currentHero, confidence)
     }
 
     BackHandler(enabled = true) { closeScanner() }
 
     LaunchedEffect(activity) {
-        // FULL_SENSOR supports portrait, both landscape directions and returning to
-        // portrait even when the device's normal auto-rotate setting is disabled.
         activity?.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR
     }
 
     LaunchedEffect(Unit) {
         if (!permissionGranted) permissionLauncher.launch(Manifest.permission.CAMERA)
         runCatching {
-            val count = detector.warmUp { progress ->
+            templatesLoadedCount = detector.warmUp { progress ->
                 scope.launch { status = progress }
             }
-            templatesLoadedCount = count
-            templatesReady = count > 0
-            if (templatesReady) {
-                status = context.getString(R.string.open_scoreboard_live)
-            } else {
-                warning = "Recognition templates could not be prepared. The camera remains available, but automatic detection needs an internet connection on first use."
-                status = context.getString(R.string.templates_unavailable)
-            }
+            templatesReady = templatesLoadedCount > 0
+            status = if (templatesReady) "Aim at the scoreboard, then tap Scan" else "Recognition references unavailable"
         }.onFailure {
-            warning = it.message ?: context.getString(R.string.templates_unavailable)
+            warning = it.message ?: "Recognition references could not be prepared"
         }
     }
 
-    LaunchedEffect(liveEnabled) {
-        liveEnabledRef.set(liveEnabled)
-        if (liveEnabled) {
-            stabilizer.reset()
-            stableSlots = 0
-            framesObserved = 0
-            readyToImport = false
-            imported = false
-            hapticSent = false
-            status = if (templatesReady) context.getString(R.string.open_scoreboard_live) else context.getString(R.string.preparing_live_scan)
-        }
-    }
-
-    LaunchedEffect(readyToImport) {
-        if (readyToImport && !hapticSent) {
-            hapticSent = true
-            if (hapticFeedback) haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-        }
-        if (readyToImport && autoOpenResults && !imported) {
-            status = context.getString(R.string.lineup_locked)
-            delay(650)
-            importStableTeams()
+    LaunchedEffect(phase, readyToImport) {
+        phaseRef.set(phase)
+        if (phase == ScanPhase.REVIEW && readyToImport && autoOpenResults) {
+            val allHighConfidence = detections.filter { it.heroId != null }.all { it.confidence >= 0.72f }
+            if (allHighConfidence) {
+                delay(650)
+                useReviewedTeams()
+            }
         }
     }
 
     DisposableEffect(activity) {
         activity?.window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
         onDispose {
-            liveEnabledRef.set(false)
             cameraProvider?.unbindAll()
             analyzerExecutor.shutdownNow()
             activity?.window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -344,17 +418,14 @@ fun CameraScanScreen(
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = Color(0xFF080B12)) {
-        Column(
-            modifier = Modifier.fillMaxSize(),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
+        Column(modifier = Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
             if (!isLandscape) {
                 Row(
-                    modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 16.dp, vertical = 12.dp),
+                    modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 18.dp, vertical = 12.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Column(Modifier.weight(1f)) {
-                        Text("LIVE SCAN", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
+                        Text("SCAN BURST", color = Color.White, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Black)
                         Text(status, color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.bodySmall)
                     }
                     TextButton(onClick = ::closeScanner) { Text("CLOSE") }
@@ -362,356 +433,286 @@ fun CameraScanScreen(
             }
 
             Box(
-                modifier = (if (isLandscape) {
+                modifier = if (isLandscape) {
                     Modifier.fillMaxHeight().aspectRatio(16f / 9f).padding(6.dp)
                 } else {
-                    // Match the viewfinder to the rotated analysis frame. V6.2 used
-                    // a landscape box in portrait, producing a narrow preview with
-                    // black side bars and misaligned normalized overlay coordinates.
-                    Modifier
-                        .fillMaxHeight(0.62f)
-                        .aspectRatio(9f / 16f, matchHeightConstraintsFirst = true)
-                        .padding(horizontal = 6.dp)
-                })
-                    .background(Color.Black, RoundedCornerShape(22.dp))
+                    Modifier.fillMaxHeight(0.58f).aspectRatio(9f / 16f, matchHeightConstraintsFirst = true).padding(horizontal = 12.dp)
+                }
             ) {
                 if (permissionGranted) {
                     key(configuration.orientation) {
-                    AndroidView(
-                        modifier = Modifier.fillMaxSize(),
-                        factory = { viewContext ->
-                            PreviewView(viewContext).also { view ->
-                                view.implementationMode = PreviewView.ImplementationMode.COMPATIBLE
-                                view.scaleType = PreviewView.ScaleType.FIT_CENTER
-                                val future = ProcessCameraProvider.getInstance(viewContext)
-                                future.addListener({
-                                    runCatching {
-                                        val provider = future.get()
-                                        val resolutionSelector = ResolutionSelector.Builder()
-                                            .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
-                                            .setResolutionStrategy(
-                                                ResolutionStrategy(
-                                                    AndroidSize(960, 540),
-                                                    ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                        AndroidView(
+                            modifier = Modifier.fillMaxSize(),
+                            factory = { viewContext ->
+                                PreviewView(viewContext).apply {
+                                    scaleType = PreviewView.ScaleType.FIT_CENTER
+                                    implementationMode = PreviewView.ImplementationMode.COMPATIBLE
+                                    val future = ProcessCameraProvider.getInstance(viewContext)
+                                    future.addListener({
+                                        runCatching {
+                                            val provider = future.get()
+                                            val rotation = display?.rotation ?: AndroidSurface.ROTATION_0
+                                            val selector = ResolutionSelector.Builder()
+                                                .setResolutionStrategy(
+                                                    ResolutionStrategy(
+                                                        AndroidSize(1280, 720),
+                                                        ResolutionStrategy.FALLBACK_RULE_CLOSEST_HIGHER_THEN_LOWER
+                                                    )
                                                 )
-                                            )
-                                            .build()
-                                        val preview = Preview.Builder()
-                                            .setResolutionSelector(resolutionSelector)
-                                            .setTargetRotation(view.display.rotation)
-                                            .build()
-                                            .also { it.setSurfaceProvider(view.surfaceProvider) }
-                                        val analysis = ImageAnalysis.Builder()
-                                            .setResolutionSelector(resolutionSelector)
-                                            .setTargetRotation(view.display.rotation)
-                                            .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
-                                            .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                            .build()
+                                                .setAspectRatioStrategy(AspectRatioStrategy.RATIO_16_9_FALLBACK_AUTO_STRATEGY)
+                                                .build()
+                                            val preview = Preview.Builder()
+                                                .setResolutionSelector(selector)
+                                                .setTargetRotation(rotation)
+                                                .build()
+                                                .also { it.setSurfaceProvider(surfaceProvider) }
+                                            val analysis = ImageAnalysis.Builder()
+                                                .setResolutionSelector(selector)
+                                                .setTargetRotation(rotation)
+                                                .setOutputImageFormat(ImageAnalysis.OUTPUT_IMAGE_FORMAT_RGBA_8888)
+                                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                                                .build()
 
-                                        view.addOnLayoutChangeListener { changedView, _, _, _, _, _, _, _, _ ->
-                                            val rotation = changedView.display?.rotation ?: return@addOnLayoutChangeListener
-                                            preview.targetRotation = rotation
-                                            analysis.targetRotation = rotation
-                                        }
-
-                                        analysis.setAnalyzer(analyzerExecutor) { image ->
-                                            val now = System.currentTimeMillis()
-                                            val manualRequest = !autoScan && singleScanRequested.compareAndSet(true, false)
-                                            val allowed = autoScan || manualRequest
-                                            if (!templatesReady || !liveEnabledRef.get() || !allowed || busy.get() || now - lastAnalysisAt.get() < scanMode.intervalMs) {
-                                                image.close()
-                                                return@setAnalyzer
-                                            }
-                                            if (!busy.compareAndSet(false, true)) {
-                                                image.close()
-                                                return@setAnalyzer
-                                            }
-                                            lastAnalysisAt.set(now)
-                                            val frame = try {
-                                                image.toScoreboardFrame()
-                                            } finally {
-                                                image.close()
-                                            }
-                                            if (frame == null) {
-                                                busy.set(false)
-                                                return@setAnalyzer
-                                            }
-
-                                            scope.launch(Dispatchers.Default) {
-                                                try {
-                                                    val quality = FrameQualityEvaluator.evaluate(frame)
-                                                    withContext(Dispatchers.Main) {
-                                                        frameBrightness = quality.brightness
-                                                        frameSharpness = quality.sharpness
-                                                        qualityHint = quality.hint
-                                                    }
-                                                    if (!quality.usable) {
+                                            analysis.setAnalyzer(analyzerExecutor) { image ->
+                                                val now = System.currentTimeMillis()
+                                                val currentPhase = phaseRef.get()
+                                                val interval = if (currentPhase == ScanPhase.CAPTURING) scanMode.intervalMs else 180L
+                                                if (now - lastAnalysisAt.get() < interval || !busy.compareAndSet(false, true)) {
+                                                    image.close()
+                                                    return@setAnalyzer
+                                                }
+                                                lastAnalysisAt.set(now)
+                                                val frame = try { image.toScoreboardFrame() } finally { image.close() }
+                                                if (frame == null) {
+                                                    busy.set(false)
+                                                    return@setAnalyzer
+                                                }
+                                                scope.launch(Dispatchers.Default) {
+                                                    try {
+                                                        val quality = FrameQualityEvaluator.evaluate(frame)
+                                                        val search = ScoreboardLocator.search(frame)
                                                         withContext(Dispatchers.Main) {
-                                                            status = when (quality.hint) {
-                                                                QualityHint.TOO_DARK -> context.getString(R.string.more_light)
-                                                                QualityHint.TOO_BRIGHT -> context.getString(R.string.reduce_glare)
-                                                                QualityHint.BLURRY -> context.getString(R.string.hold_steady)
-                                                                QualityHint.GOOD -> context.getString(R.string.open_scoreboard_live)
-                                                            }
+                                                            frameBrightness = quality.brightness
+                                                            frameSharpness = quality.sharpness
+                                                            qualityHint = quality.hint
+                                                            locatorState = search.state
+                                                            locatorConfidence = search.confidence
+                                                            framingBounds = search.framingBounds
+                                                            scoreboardRegion = search.region
+                                                            frameDimensions = "${frame.width}×${frame.height}"
                                                         }
-                                                        return@launch
-                                                    }
 
-                                                    val search = ScoreboardLocator.search(frame)
-                                                    withContext(Dispatchers.Main) {
-                                                        frameDimensions = "${frame.width}×${frame.height}"
-                                                        locatorState = search.state
-                                                        locatorConfidence = search.confidence
-                                                        scoreboardRegion = search.region
-                                                        framingBounds = search.framingBounds ?: search.region?.bounds
-                                                        if (search.region == null) {
-                                                            overlaySlots = emptyList()
-                                                            status = when (search.state) {
-                                                                ScoreboardSearchState.INCOMPLETE -> "Scoreboard found — waiting for both team panels"
-                                                                ScoreboardSearchState.NOT_FOUND -> "Aim at the blue and red scoreboard panels"
-                                                                ScoreboardSearchState.FOUND -> search.message
+                                                        if (currentPhase == ScanPhase.AIMING) {
+                                                            val votes = if (search.state == ScoreboardSearchState.FOUND && search.confidence >= 0.72f) {
+                                                                autoStartVotes.incrementAndGet()
+                                                            } else {
+                                                                autoStartVotes.set(0)
+                                                                0
                                                             }
-                                                        }
-                                                    }
-
-                                                    var zoomChanged = false
-                                                    val zoomBounds = search.framingBounds ?: search.region?.bounds
-                                                    if (autoZoom && zoomBounds != null && search.confidence >= 0.30f && now - lastAutoZoomAt.get() >= 4_000L) {
-                                                        val widthFraction = zoomBounds.width.coerceAtLeast(0.01f)
-                                                        val heightFraction = zoomBounds.height.coerceAtLeast(0.01f)
-                                                        if (widthFraction < 0.72f || heightFraction < 0.55f) {
-                                                            val camera = cameraRef.get()
-                                                            val zoomState = camera?.cameraInfo?.zoomState?.value
-                                                            val current = zoomRatioRef.get()
-                                                            val scale = minOf(0.82f / widthFraction, 0.74f / heightFraction)
-                                                                .coerceIn(1f, 1.85f)
-                                                            val target = (current * scale * 0.92f).coerceIn(
-                                                                zoomState?.minZoomRatio ?: 1f,
-                                                                zoomState?.maxZoomRatio ?: maxZoomRatio.coerceAtLeast(1f)
-                                                            )
-                                                            if (target > current + 0.10f) {
-                                                                lastAutoZoomAt.set(now)
-                                                                zoomRatioRef.set(target)
-                                                                zoomChanged = true
-                                                                withContext(Dispatchers.Main) {
-                                                                    zoomRatio = target
-                                                                    camera?.cameraControl?.setZoomRatio(target)
+                                                            withContext(Dispatchers.Main) {
+                                                                status = when (search.state) {
+                                                                    ScoreboardSearchState.FOUND -> "Scoreboard ready ${(search.confidence * 100).roundToInt()}% — tap Scan"
+                                                                    ScoreboardSearchState.INCOMPLETE -> "Both team panels are not fully visible"
+                                                                    ScoreboardSearchState.NOT_FOUND -> "Aim at the blue and red scoreboard panels"
+                                                                }
+                                                                val bounds = search.framingBounds
+                                                                if (autoZoom && bounds != null && bounds.width < 0.38f &&
+                                                                    System.currentTimeMillis() - lastAutoZoomAt.get() > 1400L
+                                                                ) {
+                                                                    lastAutoZoomAt.set(System.currentTimeMillis())
+                                                                    applyZoom(zoomRatioRef.get() * 1.18f)
                                                                     status = "Auto-framing scoreboard…"
                                                                 }
+                                                                if (autoScan && votes >= 4 && phase == ScanPhase.AIMING) startBurst()
                                                             }
+                                                            return@launch
                                                         }
-                                                    }
-                                                    if (zoomChanged || search.region == null) return@launch
-                                                    val locatedRegion = search.region
 
-                                                    val automatic = if (selectedLayout == ScoreboardLayout.AUTO) {
-                                                        detector.detectAuto(frame, locatedRegion = locatedRegion)
-                                                    } else {
-                                                        val result = detector.detectLocated(frame, locatedRegion, selectedLayout)
-                                                        AutoDetectionResult(
-                                                            result = result,
-                                                            layout = selectedLayout,
-                                                            quality = detectionQuality(result)
-                                                        )
-                                                    }
-                                                    val snapshot = stabilizer.add(automatic)
-                                                    withContext(Dispatchers.Main) {
-                                                        detections = snapshot.detections
-                                                        stableSlots = snapshot.stableSlots
-                                                        framesObserved = snapshot.framesObserved
-                                                        readyToImport = snapshot.ready
-                                                        scoreboardRegion = snapshot.scoreboardRegion
-                                                        framingBounds = snapshot.scoreboardRegion?.bounds ?: framingBounds
-                                                        overlaySlots = snapshot.slotRects
-                                                        detectedTeamSize = snapshot.teamSize
-                                                        status = when {
-                                                            snapshot.ready -> context.getString(R.string.lineup_locked)
-                                                            snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 && locatorState == ScoreboardSearchState.FOUND ->
-                                                                "Scoreboard aligned — hero matches are below confidence. Move closer, focus, or tap FRAME"
-                                                            snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 ->
-                                                                "Move closer — make the TV scoreboard fill the frame"
-                                                            else -> context.getString(R.string.detecting_live, snapshot.stableSlots)
+                                                        if (currentPhase != ScanPhase.CAPTURING) return@launch
+                                                        if (System.currentTimeMillis() >= burstDeadline.get()) {
+                                                            withContext(Dispatchers.Main) { enterReview(null) }
+                                                            return@launch
                                                         }
-                                                        if (snapshot.ready) liveEnabled = false
+                                                        val region = search.region
+                                                        if (region == null) {
+                                                            withContext(Dispatchers.Main) { status = "Scoreboard lost — hold the phone steady" }
+                                                            return@launch
+                                                        }
+                                                        if (!quality.usable) {
+                                                            withContext(Dispatchers.Main) {
+                                                                status = when (quality.hint) {
+                                                                    QualityHint.TOO_DARK -> "Too dark — increase screen brightness"
+                                                                    QualityHint.TOO_BRIGHT -> "Too much glare — change the angle"
+                                                                    QualityHint.BLURRY -> "Hold steady and tap the scoreboard to focus"
+                                                                    QualityHint.GOOD -> "Scanning — hold steady"
+                                                                }
+                                                            }
+                                                            return@launch
+                                                        }
+
+                                                        val candidateScore = search.confidence * 0.70f + (quality.sharpness * 8f).coerceIn(0f, 1f) * 0.30f
+                                                        val existing = bestFrameRef.get()
+                                                        if (existing == null || candidateScore > existing.score) {
+                                                            bestFrameRef.set(CapturedFrameCandidate(frame, region, candidateScore))
+                                                        }
+
+                                                        val automatic = if (selectedLayout == ScoreboardLayout.AUTO) {
+                                                            detector.detectAuto(frame, locatedRegion = region)
+                                                        } else {
+                                                            val result = detector.detectLocated(frame, region, selectedLayout)
+                                                            AutoDetectionResult(
+                                                                result = result,
+                                                                layout = selectedLayout,
+                                                                quality = detectionQuality(result),
+                                                                scoreboardRegion = region,
+                                                                slotRects = result.slotRects,
+                                                                teamSize = result.teamSize
+                                                            )
+                                                        }
+                                                        val progress = burstSessionRef.get()?.add(automatic) ?: return@launch
+                                                        withContext(Dispatchers.Main) {
+                                                            val snapshot = progress.snapshot
+                                                            detections = snapshot.detections
+                                                            stableSlots = snapshot.stableSlots
+                                                            burstFrames = progress.framesCaptured
+                                                            burstTarget = progress.targetFrames
+                                                            readyToImport = snapshot.ready
+                                                            detectedTeamSize = snapshot.teamSize
+                                                            resolvedLayout = automatic.layout
+                                                            scoreboardRegion = snapshot.scoreboardRegion ?: region
+                                                            overlaySlots = snapshot.slotRects
+                                                            status = "Scanning ${progress.framesCaptured}/${progress.targetFrames} — hold steady"
+                                                            if (progress.complete) enterReview(snapshot)
+                                                        }
+                                                    } catch (throwable: Throwable) {
+                                                        withContext(Dispatchers.Main) {
+                                                            warning = throwable.message ?: "The scan failed"
+                                                            if (phase == ScanPhase.CAPTURING) enterReview(null)
+                                                        }
+                                                    } finally {
+                                                        busy.set(false)
                                                     }
-                                                } catch (throwable: Throwable) {
-                                                    withContext(Dispatchers.Main) {
-                                                        warning = throwable.message ?: context.getString(R.string.scan_failed)
+                                                }
+                                            }
+
+                                            provider.unbindAll()
+                                            val camera = provider.bindToLifecycle(
+                                                lifecycleOwner,
+                                                CameraSelector.DEFAULT_BACK_CAMERA,
+                                                preview,
+                                                analysis
+                                            )
+                                            cameraProvider = provider
+                                            cameraRef.set(camera)
+                                            val zoomState = camera.cameraInfo.zoomState.value
+                                            maxZoomRatio = zoomState?.maxZoomRatio ?: 1f
+                                            zoomRatio = zoomRatioRef.get().coerceIn(zoomState?.minZoomRatio ?: 1f, maxZoomRatio.coerceAtLeast(1f))
+                                            zoomRatioRef.set(zoomRatio)
+                                            camera.cameraControl.setZoomRatio(zoomRatio)
+                                            camera.cameraInfo.zoomState.observe(lifecycleOwner) { state ->
+                                                maxZoomRatio = state.maxZoomRatio
+                                                zoomRatio = state.zoomRatio
+                                                zoomRatioRef.set(state.zoomRatio)
+                                            }
+                                            val exposureState = camera.cameraInfo.exposureState
+                                            exposureMin = exposureState.exposureCompensationRange.lower
+                                            exposureMax = exposureState.exposureCompensationRange.upper
+                                            exposureIndex = exposureState.exposureCompensationIndex
+                                            torchOn = camera.cameraInfo.torchState.value == 1
+
+                                            val scaleDetector = ScaleGestureDetector(
+                                                viewContext,
+                                                object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
+                                                    override fun onScale(detector: ScaleGestureDetector): Boolean {
+                                                        applyZoom(zoomRatioRef.get() * detector.scaleFactor)
+                                                        return true
                                                     }
-                                                } finally {
-                                                    busy.set(false)
                                                 }
-                                            }
-                                        }
-
-                                        provider.unbindAll()
-                                        val camera = provider.bindToLifecycle(
-                                            lifecycleOwner,
-                                            CameraSelector.DEFAULT_BACK_CAMERA,
-                                            preview,
-                                            analysis
-                                        )
-                                        cameraRef.set(camera)
-                                        cameraProvider = provider
-                                        val zoomState = camera.cameraInfo.zoomState.value
-                                        maxZoomRatio = zoomState?.maxZoomRatio ?: 1f
-                                        zoomRatio = zoomRatioRef.get().coerceIn(
-                                            zoomState?.minZoomRatio ?: 1f,
-                                            maxZoomRatio.coerceAtLeast(1f)
-                                        )
-                                        zoomRatioRef.set(zoomRatio)
-                                        camera.cameraControl.setZoomRatio(zoomRatio)
-                                        camera.cameraInfo.zoomState.observe(lifecycleOwner) { state ->
-                                            maxZoomRatio = state.maxZoomRatio
-                                            zoomRatioRef.set(state.zoomRatio)
-                                            zoomRatio = state.zoomRatio
-                                        }
-                                        val exposureState = camera.cameraInfo.exposureState
-                                        exposureMin = exposureState.exposureCompensationRange.lower
-                                        exposureMax = exposureState.exposureCompensationRange.upper
-                                        exposureIndex = exposureState.exposureCompensationIndex
-                                        torchOn = camera.cameraInfo.torchState.value == 1
-
-                                        val scaleDetector = ScaleGestureDetector(
-                                            viewContext,
-                                            object : ScaleGestureDetector.SimpleOnScaleGestureListener() {
-                                                override fun onScale(detector: ScaleGestureDetector): Boolean {
-                                                    val activeCamera = cameraRef.get() ?: return false
-                                                    val state = activeCamera.cameraInfo.zoomState.value
-                                                    val next = (zoomRatioRef.get() * detector.scaleFactor).coerceIn(
-                                                        state?.minZoomRatio ?: 1f,
-                                                        state?.maxZoomRatio ?: maxZoomRatio.coerceAtLeast(1f)
-                                                    )
-                                                    zoomRatioRef.set(next)
-                                                    zoomRatio = next
-                                                    activeCamera.cameraControl.setZoomRatio(next)
-                                                    lastAutoZoomAt.set(System.currentTimeMillis())
-                                                    return true
+                                            )
+                                            val tapDetector = GestureDetector(
+                                                viewContext,
+                                                object : GestureDetector.SimpleOnGestureListener() {
+                                                    override fun onDown(event: MotionEvent): Boolean = true
+                                                    override fun onSingleTapConfirmed(event: MotionEvent): Boolean {
+                                                        val point = meteringPointFactory.createPoint(event.x, event.y)
+                                                        val action = FocusMeteringAction.Builder(point)
+                                                            .setAutoCancelDuration(3, TimeUnit.SECONDS)
+                                                            .build()
+                                                        cameraRef.get()?.cameraControl?.startFocusAndMetering(action)
+                                                        status = "Focusing…"
+                                                        return true
+                                                    }
                                                 }
+                                            )
+                                            setOnTouchListener { _, event ->
+                                                scaleDetector.onTouchEvent(event)
+                                                tapDetector.onTouchEvent(event)
+                                                true
                                             }
-                                        )
-                                        val tapDetector = GestureDetector(
-                                            viewContext,
-                                            object : GestureDetector.SimpleOnGestureListener() {
-                                                override fun onDown(event: MotionEvent): Boolean = true
-
-                                                override fun onSingleTapConfirmed(event: MotionEvent): Boolean {
-                                                    val point = view.meteringPointFactory.createPoint(event.x, event.y)
-                                                    val action = FocusMeteringAction.Builder(point)
-                                                        .setAutoCancelDuration(3, TimeUnit.SECONDS)
-                                                        .build()
-                                                    cameraRef.get()?.cameraControl?.startFocusAndMetering(action)
-                                                    status = context.getString(R.string.tap_to_focus_hint)
-                                                    return true
-                                                }
-                                            }
-                                        )
-                                        view.setOnTouchListener { _, event ->
-                                            scaleDetector.onTouchEvent(event)
-                                            tapDetector.onTouchEvent(event)
-                                            true
+                                        }.onFailure {
+                                            fatalError = it.message ?: "Camera failed to start"
                                         }
-                                    }.onFailure {
-                                        fatalError = it.message ?: context.getString(R.string.scan_failed)
-                                    }
-                                }, ContextCompat.getMainExecutor(viewContext))
+                                    }, ContextCompat.getMainExecutor(viewContext))
+                                }
                             }
-                        }
-                    )
+                        )
                     }
-                    if (showDetections) DynamicScoreboardOverlay(scoreboardRegion, framingBounds, overlaySlots)
+                    BurstGuideOverlay(
+                        region = scoreboardRegion,
+                        framingBounds = framingBounds,
+                        slots = if (phase == ScanPhase.REVIEW && showDetections) overlaySlots else emptyList(),
+                        phase = phase
+                    )
                 } else {
                     Column(
                         modifier = Modifier.align(Alignment.Center).padding(20.dp),
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Text(stringResource(R.string.camera_permission_needed), color = Color.White)
-                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
-                            Text(stringResource(R.string.allow_camera))
-                        }
-                        OutlinedButton(onClick = { context.openAppSettings() }) {
-                            Text("OPEN APP SETTINGS")
-                        }
+                        Text("Camera permission is required", color = Color.White)
+                        Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) { Text("ALLOW CAMERA") }
+                        OutlinedButton(onClick = { context.openAppSettings() }) { Text("OPEN APP SETTINGS") }
                     }
                 }
 
-                // Portrait already has CLOSE above the preview and Android Back is
-                // handled globally. Keeping a second large EXIT button inside the
-                // portrait preview covered the first ally rows during recognition.
                 if (isLandscape) {
                     Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopStart)
-                            .statusBarsPadding()
-                            .padding(10.dp)
-                            .clickable { closeScanner() },
+                        modifier = Modifier.align(Alignment.TopStart).statusBarsPadding().padding(10.dp).clickable { closeScanner() },
                         color = Color.Black.copy(alpha = 0.78f),
-                        shape = RoundedCornerShape(14.dp),
-                        tonalElevation = 6.dp
-                    ) {
-                        Text(
-                            text = "← EXIT SCAN",
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                            color = Color.White,
-                            fontWeight = FontWeight.Black
-                        )
-                    }
-
-                    Surface(
-                        modifier = Modifier
-                            .align(Alignment.TopCenter)
-                            .statusBarsPadding()
-                            .padding(top = 10.dp),
-                        color = Color.Black.copy(alpha = 0.68f),
                         shape = RoundedCornerShape(14.dp)
                     ) {
-                        Column(
-                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 7.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
+                        Text("← EXIT", modifier = Modifier.padding(horizontal = 15.dp, vertical = 10.dp), color = Color.White, fontWeight = FontWeight.Black)
+                    }
+                    Surface(
+                        modifier = Modifier.align(Alignment.TopCenter).statusBarsPadding().padding(top = 10.dp),
+                        color = Color.Black.copy(alpha = 0.72f),
+                        shape = RoundedCornerShape(14.dp)
+                    ) {
+                        Column(Modifier.padding(horizontal = 14.dp, vertical = 7.dp), horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text(status, color = Color.White, fontWeight = FontWeight.Bold)
                             Text(
-                                text = "$status · $stableSlots/${detectedTeamSize * 2}",
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold
-                            )
-                            Text(
-                                text = "${locatorState.name.lowercase()} ${(locatorConfidence * 100).roundToInt()}% · $templatesLoadedCount templates · $frameDimensions · ${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×/${String.format(java.util.Locale.US, "%.1f", maxZoomRatio)}×",
+                                "${locatorState.name.lowercase()} ${(locatorConfidence * 100).roundToInt()}% · $templatesLoadedCount refs · $frameDimensions",
                                 color = Color(0xFF83D8FF),
                                 style = MaterialTheme.typography.labelSmall
                             )
                         }
                     }
-
                     Surface(
-                        modifier = Modifier
-                            .align(Alignment.BottomEnd)
-                            .padding(10.dp),
-                        color = Color.Black.copy(alpha = 0.76f),
-                        shape = RoundedCornerShape(16.dp)
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(10.dp),
+                        color = Color.Black.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(18.dp)
                     ) {
-                        Row(
-                            modifier = Modifier.padding(8.dp),
-                            horizontalArrangement = Arrangement.spacedBy(8.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
+                        Row(Modifier.padding(9.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
                             OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() - 0.5f) }) { Text("−") }
-                            Text(
-                                "${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×",
-                                color = Color.White,
-                                fontWeight = FontWeight.Black
-                            )
+                            Text(String.format(Locale.US, "%.1f×", zoomRatio), color = Color.White, fontWeight = FontWeight.Black)
                             OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() + 0.5f) }) { Text("+") }
-                            OutlinedButton(onClick = { frameScoreboard() }) { Text("FRAME") }
-                            OutlinedButton(onClick = {
-                                liveEnabled = !liveEnabled
-                                if (liveEnabled) warning = null
-                            }) {
-                                Text(if (liveEnabled) stringResource(R.string.pause) else stringResource(R.string.rescan))
-                            }
-                            if (readyToImport) {
-                                Button(onClick = { importStableTeams() }) {
-                                    Text(stringResource(R.string.use_now), fontWeight = FontWeight.Black)
+                            OutlinedButton(onClick = ::frameScoreboard) { Text("FRAME") }
+                            when (phase) {
+                                ScanPhase.AIMING -> Button(onClick = ::startBurst) { Text("SCAN", fontWeight = FontWeight.Black) }
+                                ScanPhase.CAPTURING -> OutlinedButton(onClick = { enterReview(null) }) { Text("STOP") }
+                                ScanPhase.REVIEW -> {
+                                    OutlinedButton(onClick = ::scanAgain) { Text("AGAIN") }
+                                    Button(onClick = ::useReviewedTeams) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
                                 }
                             }
                         }
@@ -719,157 +720,125 @@ fun CameraScanScreen(
                 }
             }
 
-            if (!isLandscape) Column(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .weight(1f)
-                    .verticalScroll(rememberScrollState())
-                    .padding(horizontal = 14.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
-            ) {
-                LinearProgressIndicator(
-                    progress = { stableSlots / (detectedTeamSize * 2f) },
-                    modifier = Modifier.fillMaxWidth()
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("$stableSlots/${detectedTeamSize * 2} stable · $framesObserved frames", color = Color.White.copy(alpha = 0.72f), modifier = Modifier.weight(1f))
-                    Text("${String.format(java.util.Locale.US, "%.1f", zoomRatio)}×", color = Color.White, fontWeight = FontWeight.Bold)
-                }
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    ScoreboardLayout.entries.forEach { layout ->
-                        FilterChip(
-                            selected = selectedLayout == layout,
-                            onClick = {
-                                selectedLayout = layout
-                                liveEnabled = true
-                                stabilizer.reset()
-                            },
-                            label = { Text(layout.displayName) }
-                        )
-                    }
-                }
-                Text(
-                    "${scanMode.label} mode · brightness ${(frameBrightness * 100).roundToInt()}% · detail ${(frameSharpness * 1000).roundToInt()} · ${qualityHint.name.lowercase().replaceFirstChar(Char::uppercase)}",
-                    color = Color.White.copy(alpha = 0.65f),
-                    style = MaterialTheme.typography.labelSmall
-                )
-                Text(
-                    "Detector: $templatesLoadedCount heroes · Locator: ${locatorState.name.lowercase().replaceFirstChar(Char::uppercase)} ${(locatorConfidence * 100).roundToInt()}% · Frame $frameDimensions · Camera max ${String.format(java.util.Locale.US, "%.1f", maxZoomRatio)}×",
-                    color = Color(0xFF83D8FF),
-                    style = MaterialTheme.typography.labelSmall
-                )
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() - 0.5f) }) { Text("−") }
-                    OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() + 0.5f) }) { Text("+") }
-                    OutlinedButton(onClick = { frameScoreboard() }) { Text("FRAME") }
-
-                    if (!autoScan) {
-                        Button(onClick = {
-                            liveEnabled = true
-                            singleScanRequested.set(true)
-                            status = "Scanning current frame…"
-                        }, modifier = Modifier.weight(1f)) {
-                            Text("SCAN NOW", fontWeight = FontWeight.Black)
-                        }
-                    } else {
-                        OutlinedButton(
-                            onClick = {
-                                liveEnabled = !liveEnabled
-                                if (liveEnabled) warning = null
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text(if (liveEnabled) stringResource(R.string.pause) else stringResource(R.string.rescan))
-                        }
-                    }
-
-                    if (readyToImport) {
-                        Button(onClick = { importStableTeams() }, modifier = Modifier.weight(1f)) {
-                            Text(stringResource(R.string.use_now))
-                        }
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    Text("Zoom", color = Color.White.copy(alpha = 0.72f), style = MaterialTheme.typography.labelSmall)
-                    listOf(1f, 2f, 3f).forEach { preset ->
-                        FilterChip(
-                            selected = kotlin.math.abs(zoomRatio - preset) < 0.15f,
-                            onClick = { applyZoom(preset) },
-                            enabled = preset <= maxZoomRatio + 0.01f,
-                            label = { Text("${preset.toInt()}×") }
-                        )
-                    }
-                }
-
-                Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
-                    OutlinedButton(onClick = {
-                        val camera = cameraRef.get() ?: return@OutlinedButton
-                        // Return to continuous autofocus; tap the preview for point focus.
-                        camera.cameraControl.cancelFocusAndMetering()
-                        status = context.getString(R.string.tap_to_focus_hint)
-                    }) { Text("FOCUS") }
-                    if (cameraRef.get()?.cameraInfo?.hasFlashUnit() == true) {
-                        OutlinedButton(onClick = {
-                            torchOn = !torchOn
-                            cameraRef.get()?.cameraControl?.enableTorch(torchOn)
-                        }) { Text(if (torchOn) "TORCH OFF" else "TORCH") }
-                    }
-                    Text("Pinch to zoom", color = Color.White.copy(alpha = 0.62f), style = MaterialTheme.typography.labelSmall)
-                }
-                if (exposureMax > exposureMin) {
+            if (!isLandscape) {
+                Column(
+                    modifier = Modifier.fillMaxWidth().weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 10.dp),
+                    verticalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    val progress = if (phase == ScanPhase.CAPTURING) burstFrames / burstTarget.toFloat().coerceAtLeast(1f) else stableSlots / (detectedTeamSize * 2f)
+                    LinearProgressIndicator(progress = { progress.coerceIn(0f, 1f) }, modifier = Modifier.fillMaxWidth())
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("Exposure", color = Color.White, modifier = Modifier.width(70.dp), style = MaterialTheme.typography.labelSmall)
-                        Slider(
-                            value = exposureIndex.toFloat(),
-                            onValueChange = { value ->
-                                exposureIndex = value.roundToInt().coerceIn(exposureMin, exposureMax)
-                                cameraRef.get()?.cameraControl?.setExposureCompensationIndex(exposureIndex)
+                        Text(
+                            when (phase) {
+                                ScanPhase.AIMING -> "Locator ${(locatorConfidence * 100).roundToInt()}%"
+                                ScanPhase.CAPTURING -> "$burstFrames/$burstTarget burst frames · $stableSlots stable"
+                                ScanPhase.REVIEW -> "$stableSlots/${detectedTeamSize * 2} confident · tap any slot to correct"
                             },
-                            valueRange = exposureMin.toFloat()..exposureMax.toFloat(),
+                            color = Color.White.copy(alpha = 0.76f),
                             modifier = Modifier.weight(1f)
                         )
+                        Text(String.format(Locale.US, "%.1f×", zoomRatio), color = Color.White, fontWeight = FontWeight.Bold)
                     }
-                }
 
-                if (showDetections && detections.isNotEmpty()) {
-                    LiveDetectionStrip(
-                        detections = detections,
-                        ownAllySlot = ownAllySlot,
-                        onDetectionClick = { index ->
-                            liveEnabled = false
-                            correctionIndex = index
-                        }
-                    )
-                }
-
-                Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141A25))) {
-                    Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text(stringResource(R.string.my_row_optional), color = Color.White, style = MaterialTheme.typography.labelMedium)
+                    if (phase == ScanPhase.AIMING) {
+                        Text("One large frame replaces the old ten-box alignment. Keep both team panels inside it.", color = Color.White.copy(alpha = 0.68f), style = MaterialTheme.typography.bodySmall)
                         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                            (0 until detectedTeamSize).forEach { slot ->
+                            ScoreboardLayout.entries.forEach { layout ->
                                 FilterChip(
-                                    selected = ownAllySlot == slot,
-                                    onClick = { ownAllySlot = if (ownAllySlot == slot) null else slot },
-                                    label = { Text("${slot + 1}") }
+                                    selected = selectedLayout == layout,
+                                    onClick = { selectedLayout = layout },
+                                    label = { Text(layout.displayName) }
                                 )
                             }
                         }
                     }
-                }
 
-                warning?.let { message ->
-                    Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF392B12))) {
-                        Text(message, modifier = Modifier.padding(12.dp), color = Color(0xFFFFDFA6))
+                    if (phase != ScanPhase.AIMING) {
+                        LiveDetectionStrip(
+                            detections = detections,
+                            ownAllySlot = ownAllySlot,
+                            onDetectionClick = { correctionIndex = it }
+                        )
+                        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141A25))) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text("My row (optional)", color = Color.White, fontWeight = FontWeight.Bold)
+                                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    repeat(detectedTeamSize) { slot ->
+                                        FilterChip(
+                                            selected = ownAllySlot == slot,
+                                            onClick = { ownAllySlot = if (ownAllySlot == slot) null else slot },
+                                            label = { Text("${slot + 1}") }
+                                        )
+                                    }
+                                }
+                            }
+                        }
                     }
-                }
 
-                fatalError?.let { message ->
-                    Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
-                        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text(message, color = MaterialTheme.colorScheme.onErrorContainer)
-                            OutlinedButton(onClick = { context.openAppSettings() }) { Text("OPEN APP SETTINGS") }
+                    Text(
+                        "${scanMode.label} burst · brightness ${(frameBrightness * 100).roundToInt()}% · detail ${(frameSharpness * 1000).roundToInt()} · ${qualityHint.name.lowercase().replaceFirstChar(Char::uppercase)}",
+                        color = Color.White.copy(alpha = 0.65f),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+                    Text(
+                        "Detector: $templatesLoadedCount heroes · Locator: ${locatorState.name.lowercase().replaceFirstChar(Char::uppercase)} ${(locatorConfidence * 100).roundToInt()}% · Frame $frameDimensions · Camera max ${String.format(Locale.US, "%.1f", maxZoomRatio)}×",
+                        color = Color(0xFF83D8FF),
+                        style = MaterialTheme.typography.labelSmall
+                    )
+
+                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() - 0.5f) }) { Text("−") }
+                        OutlinedButton(onClick = { applyZoom(zoomRatioRef.get() + 0.5f) }) { Text("+") }
+                        OutlinedButton(onClick = ::frameScoreboard) { Text("FRAME") }
+                        OutlinedButton(onClick = {
+                            val camera = cameraRef.get()
+                            torchOn = !torchOn
+                            camera?.cameraControl?.enableTorch(torchOn)
+                        }) { Text(if (torchOn) "TORCH OFF" else "TORCH") }
+                    }
+
+                    if (exposureMax > exposureMin) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text("Exposure", color = Color.White, modifier = Modifier.width(76.dp))
+                            androidx.compose.material3.Slider(
+                                value = exposureIndex.toFloat(),
+                                onValueChange = { value ->
+                                    val next = value.roundToInt().coerceIn(exposureMin, exposureMax)
+                                    exposureIndex = next
+                                    cameraRef.get()?.cameraControl?.setExposureCompensationIndex(next)
+                                },
+                                valueRange = exposureMin.toFloat()..exposureMax.toFloat(),
+                                modifier = Modifier.weight(1f)
+                            )
+                        }
+                    }
+
+                    when (phase) {
+                        ScanPhase.AIMING -> Button(onClick = ::startBurst, modifier = Modifier.fillMaxWidth().height(58.dp)) {
+                            Text("SCAN ${scanMode.burstFrames} FRAMES", fontWeight = FontWeight.Black)
+                        }
+                        ScanPhase.CAPTURING -> OutlinedButton(onClick = { enterReview(null) }, modifier = Modifier.fillMaxWidth()) { Text("STOP AND REVIEW") }
+                        ScanPhase.REVIEW -> Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                            OutlinedButton(onClick = ::scanAgain, modifier = Modifier.weight(1f)) { Text("SCAN AGAIN") }
+                            Button(onClick = ::useReviewedTeams, modifier = Modifier.weight(1f)) { Text("USE RESULTS", fontWeight = FontWeight.Black) }
+                        }
+                    }
+
+                    if (collectTrainingData) {
+                        Text("Training collection is ON. Only the cropped scoreboard and reviewed portrait cells are saved locally after Use Results.", color = Color(0xFFA7F3D0), style = MaterialTheme.typography.bodySmall)
+                    }
+                    datasetMessage?.let { Text(it, color = Color(0xFFA7F3D0), style = MaterialTheme.typography.bodySmall) }
+                    warning?.let { message ->
+                        Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF392B12))) {
+                            Text(message, modifier = Modifier.padding(12.dp), color = Color(0xFFFFDFA6))
+                        }
+                    }
+                    fatalError?.let { message ->
+                        Card(colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.errorContainer)) {
+                            Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                                Text(message, color = MaterialTheme.colorScheme.onErrorContainer)
+                                OutlinedButton(onClick = { context.openAppSettings() }) { Text("OPEN APP SETTINGS") }
+                            }
                         }
                     }
                 }
@@ -886,8 +855,10 @@ fun CameraScanScreen(
                     if (itemIndex == index) detection.copy(heroId = heroId, confidence = 1f) else detection
                 }
                 correctionIndex = null
-                readyToImport = detections.count { it.team == TeamSide.ENEMY && it.heroId != null } == detectedTeamSize &&
-                    detections.count { it.team == TeamSide.ALLY && it.heroId != null } >= detectedTeamSize - 1
+                val alliesKnown = detections.count { it.team == TeamSide.ALLY && it.heroId != null }
+                val enemiesKnown = detections.count { it.team == TeamSide.ENEMY && it.heroId != null }
+                readyToImport = enemiesKnown == detectedTeamSize && alliesKnown >= detectedTeamSize - 1
+                stableSlots = alliesKnown + enemiesKnown
             },
             onDismiss = { correctionIndex = null }
         )
@@ -895,55 +866,45 @@ fun CameraScanScreen(
 }
 
 @Composable
-private fun DynamicScoreboardOverlay(
+private fun BurstGuideOverlay(
     region: ScoreboardRegion?,
     framingBounds: NormalizedRect?,
-    slots: List<Pair<TeamSide, NormalizedRect>>
+    slots: List<Pair<TeamSide, NormalizedRect>>,
+    phase: ScanPhase
 ) {
     Canvas(Modifier.fillMaxSize()) {
-        val stroke = Stroke(width = 2.dp.toPx())
-        if (region == null) {
-            // Once either team panel is seen, show the real partial bounds so FRAME
-            // and auto-zoom behaviour are visible instead of leaving a static guide.
-            if (framingBounds != null) {
-                drawRect(
-                    color = Color(0xFFFFC857).copy(alpha = 0.90f),
-                    topLeft = Offset(framingBounds.left * size.width, framingBounds.top * size.height),
-                    size = Size(framingBounds.width * size.width, framingBounds.height * size.height),
-                    style = Stroke(width = 3.dp.toPx())
-                )
-            } else {
-                val guideWidth = size.width * 0.72f
-                val guideHeight = size.height * 0.68f
-                drawRoundRect(
-                    color = Color.White.copy(alpha = 0.55f),
-                    topLeft = Offset((size.width - guideWidth) / 2f, (size.height - guideHeight) / 2f),
-                    size = Size(guideWidth, guideHeight),
-                    cornerRadius = androidx.compose.ui.geometry.CornerRadius(18.dp.toPx()),
-                    style = Stroke(width = 2.dp.toPx())
-                )
+        val guide = framingBounds ?: region?.bounds
+        if (guide != null) {
+            val color = when (phase) {
+                ScanPhase.AIMING -> Color(0xFF60A5FA)
+                ScanPhase.CAPTURING -> Color(0xFFFFB84D)
+                ScanPhase.REVIEW -> Color(0xFF34D399)
             }
-            return@Canvas
-        }
-
-        listOf(TeamSide.ALLY to region.allyPanel, TeamSide.ENEMY to region.enemyPanel).forEach { (team, rect) ->
-            val color = if (team == TeamSide.ALLY) Color(0xFF22D3EE) else Color(0xFFFB7185)
             drawRoundRect(
-                color = color.copy(alpha = 0.72f),
-                topLeft = Offset(rect.left * size.width, rect.top * size.height),
-                size = Size(rect.width * size.width, rect.height * size.height),
-                cornerRadius = androidx.compose.ui.geometry.CornerRadius(8.dp.toPx()),
-                style = Stroke(width = 2.dp.toPx())
+                color = color,
+                topLeft = Offset(guide.left * size.width, guide.top * size.height),
+                size = Size(guide.width * size.width, guide.height * size.height),
+                cornerRadius = CornerRadius(16.dp.toPx()),
+                style = Stroke(width = 3.dp.toPx())
+            )
+        } else {
+            val width = size.width * 0.76f
+            val height = size.height * 0.62f
+            drawRoundRect(
+                color = Color.White.copy(alpha = 0.72f),
+                topLeft = Offset((size.width - width) / 2f, (size.height - height) / 2f),
+                size = Size(width, height),
+                cornerRadius = CornerRadius(20.dp.toPx()),
+                style = Stroke(width = 3.dp.toPx())
             )
         }
-
         slots.forEach { (team, rect) ->
             val color = if (team == TeamSide.ALLY) Color(0xFF67E8F9) else Color(0xFFFB7185)
             drawRect(
                 color = color,
                 topLeft = Offset(rect.left * size.width, rect.top * size.height),
                 size = Size(rect.width * size.width, rect.height * size.height),
-                style = stroke
+                style = Stroke(width = 2.dp.toPx())
             )
         }
     }
@@ -956,9 +917,9 @@ private fun LiveDetectionStrip(
     onDetectionClick: (Int) -> Unit
 ) {
     Card(colors = CardDefaults.cardColors(containerColor = Color(0xFF141A25))) {
-        Column(Modifier.padding(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        Column(Modifier.padding(10.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
             TeamSide.entries.forEach { team ->
-                Row(horizontalArrangement = Arrangement.spacedBy(6.dp), verticalAlignment = Alignment.CenterVertically) {
+                Row(horizontalArrangement = Arrangement.spacedBy(4.dp), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         if (team == TeamSide.ALLY) stringResource(R.string.allies) else stringResource(R.string.enemies),
                         color = Color.White,
@@ -972,23 +933,15 @@ private fun LiveDetectionStrip(
                             modifier = Modifier
                                 .clickable { onDetectionClick(indexed.index) }
                                 .background(
-                                    if (team == TeamSide.ALLY && ownAllySlot == detection.slot) Color.White.copy(alpha = 0.25f)
-                                    else Color.Transparent,
+                                    if (team == TeamSide.ALLY && ownAllySlot == detection.slot) Color.White.copy(alpha = 0.24f) else Color.Transparent,
                                     RoundedCornerShape(8.dp)
                                 )
                                 .padding(3.dp),
                             horizontalAlignment = Alignment.CenterHorizontally
                         ) {
-                            if (hero != null) {
-                                HeroPortrait(hero.id, hero.name, Modifier.size(34.dp))
-                            } else {
-                                Box(Modifier.size(34.dp).background(Color.DarkGray, RoundedCornerShape(6.dp)))
-                            }
-                            Text(
-                                "${(detection.confidence * 100).roundToInt()}%",
-                                color = Color.White,
-                                style = MaterialTheme.typography.labelSmall
-                            )
+                            if (hero != null) HeroPortrait(hero.id, hero.name, Modifier.size(36.dp))
+                            else Box(Modifier.size(36.dp).background(Color.DarkGray, RoundedCornerShape(7.dp)))
+                            Text("${(detection.confidence * 100).roundToInt()}%", color = Color.White, style = MaterialTheme.typography.labelSmall)
                         }
                     }
                 }
@@ -1005,15 +958,9 @@ private fun SingleHeroPickerDialog(
     onDismiss: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val filtered = remember(query) {
-        HeroCatalog.heroes.filter { it.name.contains(query, ignoreCase = true) }
-    }
+    val filtered = remember(query) { HeroCatalog.heroes.filter { it.name.contains(query, ignoreCase = true) } }
     Dialog(onDismissRequest = onDismiss) {
-        Surface(
-            modifier = Modifier.fillMaxWidth().height(520.dp),
-            shape = RoundedCornerShape(22.dp),
-            tonalElevation = 6.dp
-        ) {
+        Surface(modifier = Modifier.fillMaxWidth().height(520.dp), shape = RoundedCornerShape(22.dp), tonalElevation = 6.dp) {
             Column(Modifier.padding(18.dp)) {
                 Text(stringResource(R.string.correct_hero), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 if (suggested.isNotEmpty()) {
@@ -1058,6 +1005,10 @@ private fun SingleHeroPickerDialog(
     }
 }
 
+private fun placeholderDetections(teamSize: Int): List<HeroDetection> = buildList {
+    repeat(teamSize) { add(HeroDetection(null, TeamSide.ALLY, it, 0f)) }
+    repeat(teamSize) { add(HeroDetection(null, TeamSide.ENEMY, it, 0f)) }
+}
 
 private fun detectionQuality(result: DetectionResult): Float {
     val accepted = result.detections.filter { it.heroId != null }

@@ -50,9 +50,9 @@ fun OnboardingScreen(onFinish: () -> Unit) {
         listOf(
             IntroPage(
                 symbol = "⌗",
-                eyebrow = "LIVE VISION",
-                title = "Point. Scan. Pick.",
-                body = "Open the scoreboard and hold the phone steady. HeroLens combines multiple camera frames before it trusts a lineup."
+                eyebrow = "SCAN BURST",
+                title = "Aim. Tap. Review.",
+                body = "Center the scoreboard, tap Scan, and hold steady for a short burst. HeroLens then pauses so you can correct every uncertain hero."
             ),
             IntroPage(
                 symbol = "◎",
@@ -63,8 +63,8 @@ fun OnboardingScreen(onFinish: () -> Unit) {
             IntroPage(
                 symbol = "◈",
                 eyebrow = "PRIVATE BY DESIGN",
-                title = "Your camera stays on-device",
-                body = "Frames are analyzed in memory. Your hero pool and scan history stay on your phone, and no account is required."
+                title = "You control the training data",
+                body = "Nothing is uploaded automatically. Optional training collection saves only cropped scoreboard cells after you review them, and you can export or delete them anytime."
             )
         )
     }
@@ -87,7 +87,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                 .padding(24.dp)
         ) {
             Text(
-                "HEROLENS V6",
+                "HEROLENS V7",
                 modifier = Modifier.align(Alignment.TopStart),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Black

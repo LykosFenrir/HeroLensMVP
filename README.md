@@ -1,81 +1,65 @@
-# HeroLens V6.4 Calibrated Scanner
+# HeroLens V7 Scan Burst
 
-HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a scoreboard with the rear camera, recommend three heroes and explain the enemy counters, ally synergies, map fit, player-comfort impact and switch timing behind every suggestion.
+HeroLens is an unofficial Android-first Overwatch hero-pick coach. It combines scoreboard recognition with explainable recommendations based on enemy counters, ally synergy, map fit, rank, platform, personal hero comfort and switching cost.
 
-## V6.4 scanner correction
+## V7 scanner workflow
 
-V6.4 adds adaptive portrait-column/header geometry search, calibrated confidence, stronger false-positive rejection, and a 5v5 preference based on the latest ASUS laptop and Hisense/PS5 real-device screenshots. See `V6_4_CONFIDENCE_AND_GEOMETRY_FIX.md`.
+V7 replaces endless live classification and ten fixed alignment boxes with a simpler flow:
 
-## What V6.4 includes
+- one large scoreboard guide;
+- tap **Scan**;
+- a fixed 6/9/12-frame burst;
+- pause and review;
+- tap any uncertain slot to correct it;
+- use the reviewed lineup for recommendations.
 
-- Fast, Balanced and Accurate live-scan modes.
-- Automatic or fixed scoreboard portrait-side detection.
-- Multi-frame stability voting, frame-quality rejection and confidence review.
-- Pinch zoom, exposure, torch, tap-to-focus and autofocus reset.
-- Improved portrait matcher using luminance, edges, colour histogram and perceptual hash.
-- Cached detector signatures after first preparation.
-- PC/console context and persistent player hero pool.
-- Recommendation score breakdown, first-fight playbook and risk warning.
-- Onboarding, richer scan history and improved mobile layout.
-- Matching V6 browser/PWA prototype.
+The scoreboard locator runs while aiming, while expensive portrait matching runs only during the burst. CameraX uses latest-frame-only analysis so old frames do not queue behind the current viewfinder.
 
-See `V6_RELEASE_NOTES.md`, `V6_2_SCANNER_REBUILD.md`, `V6_3_VALIDATED_SCANNER.md` and `docs/V6_3_SCANNER_TEST_REPORT.md` for details.
+## Opt-in dataset collector
 
+The **Help train accurate detection** setting is off by default. After a reviewed scan, HeroLens can locally save only the cropped scoreboard and portrait cells with corrected labels. Nothing is uploaded automatically. Samples can be exported as a ZIP or deleted from Settings.
 
-### V6.2 scanner rebuild
+See `V7_SCAN_BURST_AND_DATASET.md` for privacy and dataset details.
 
-- Dynamic blue/red scoreboard localisation instead of fixed overlay coordinates.
-- Automatic camera framing and working PreviewView pinch zoom.
-- Portrait and both landscape rotations while scanning.
-- Dynamic 5v5/6v6 hero slots aligned to the detected TV scoreboard.
-- Faster multi-crop portrait matching and a fresh V6.2 detector cache.
+## Android build
 
-### V6.3 validated scanner correction
+Requirements:
 
-- Adaptive CameraX packed-byte decoding for current RGBA and legacy ARGB camera streams.
-- Scoreboard locator validated against supplied Hisense TV and ASUS laptop captures.
-- Correct distinction between full scoreboards, incomplete lobbies and non-scoreboard menus.
-- Team-colour portrait templates for cyan/blue and red scoreboard backgrounds.
-- Wider portrait viewfinder, explicit zoom presets and live detector diagnostics.
-- Auto-frame can use a partially visible team panel while waiting for the full scoreboard.
-- Manual zoom remains in control for four seconds before auto-frame can adjust it.
+- Android Studio / Android SDK 36
+- JDK 17
+- Internet access for the first Gradle sync and first portrait-reference preparation
 
-## Build the Android APK with GitHub Actions
-
-The repository contains `.github/workflows/android-build.yml`.
-
-1. Upload the project contents to the root of your GitHub repository.
-2. Open **Actions**.
-3. Select **Build Android APK**.
-4. Select **Run workflow**.
-5. After the green check mark, download **HeroLens-debug-apk** from Artifacts.
-6. Extract the ZIP and install `app-debug.apk` on Android.
-
-Local Windows build:
+Build on Windows:
 
 ```powershell
 .\gradlew.bat test assembleDebug
 ```
 
-The APK is written to:
+APK output:
 
 ```text
 app\build\outputs\apk\debug\app-debug.apk
 ```
 
-## Browser/PWA
+The included GitHub Actions workflow builds the same debug APK and uploads it as `HeroLens-debug-apk`.
 
-The web version is in `prototype/`. Camera access generally requires HTTPS; a downloaded local HTML file may be blocked by mobile browsers. Deploy the complete `prototype` folder through GitHub Pages or another HTTPS host.
+## Implemented
 
-## Scanner behaviour
+- Tank, Damage and Support recommendations
+- Enemy-counter and ally-synergy explanations
+- Map, rank, PC/console and personal hero-pool context
+- Scoreboard locator for TV/laptop captures
+- 5v5 and 6v6 geometry handling
+- Fast, Balanced and Accurate burst profiles
+- Review/correct screen
+- Zoom, focus, torch, exposure and rotation support
+- Local history
+- English and Arabic resources
+- Optional local training-sample collection and ZIP export
+- Replaceable detector interface for a future LiteRT model
 
-The first recognition preparation needs internet access to obtain the portrait templates. Android then stores compact detector signatures locally. Camera frames are processed on-device and are not uploaded by the supplied code.
+## Accuracy note
 
-The V6 recognizer remains experimental template matching, not a trained production AI detector. Review detections and correct uncertain slots before relying on a recommendation.
+The bundled portrait recognizer remains experimental template matching, not a production-trained neural detector. V7 improves usability and creates the reviewed dataset workflow needed to train and validate the future model honestly.
 
-## Data and legal notes
-
-- HeroLens is not affiliated with or endorsed by Blizzard Entertainment.
-- The repository does not include game binaries, memory readers, input automation, injection or game-client hooks.
-- Recommendations are advisory and never automate gameplay.
-- Obtain legal review before public distribution, monetisation or using visual training datasets.
+HeroLens is not affiliated with or endorsed by Blizzard Entertainment. The repository contains no game-client hooks, memory readers, input automation or game binaries.

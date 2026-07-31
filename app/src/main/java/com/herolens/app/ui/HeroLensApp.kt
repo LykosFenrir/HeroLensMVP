@@ -49,6 +49,7 @@ import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,6 +72,8 @@ import com.herolens.app.core.RecommendationEngine
 import com.herolens.app.core.Role
 import com.herolens.app.core.Trait
 import com.herolens.app.data.AppStore
+import com.herolens.app.data.DatasetCollector
+import com.herolens.app.data.DisplayType
 import com.herolens.app.data.InputPlatform
 import com.herolens.app.data.PlayerState
 import com.herolens.app.data.RankTier
@@ -81,6 +84,9 @@ import com.herolens.app.vision.ScoreboardLayout
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlin.math.abs
 
 private enum class PickerTarget { ALLY, ENEMY }
@@ -175,6 +181,9 @@ fun HeroLensApp() {
             autoZoom = settings.autoZoom,
             scanMode = settings.scanMode,
             preferredLayout = settings.preferredLayout,
+            collectTrainingData = settings.collectTrainingData,
+            inputPlatform = settings.inputPlatform,
+            displayType = settings.displayType,
             onClose = { showScanner = false },
             onUseDetections = { detectedAllies, detectedEnemies, detectedCurrentHero, confidence ->
                 allyIds.clear()
@@ -842,6 +851,12 @@ private fun HistoryScreen(
 @Composable
 private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (ScannerSettings) -> Unit) {
     val context = LocalContext.current
+    val datasetCollector = remember { DatasetCollector(context.applicationContext) }
+    val settingsScope = rememberCoroutineScope()
+    var datasetBusy by remember { mutableStateOf(false) }
+    var datasetRevision by remember { mutableStateOf(0) }
+    val datasetCount = remember(datasetRevision) { datasetCollector.sampleCount() }
+    val datasetSizeMb = remember(datasetRevision) { datasetCollector.sizeBytes() / (1024f * 1024f) }
     val cameraGranted = context.checkSelfPermission(Manifest.permission.CAMERA) == PackageManager.PERMISSION_GRANTED
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
@@ -906,7 +921,21 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         }
 
         item {
-            SettingsCard(title = "Scan accuracy", description = settings.scanMode.description) {
+            SettingsCard(title = "Screen being scanned", description = "Saved with opt-in training samples and used to tune future TV and laptop models separately.") {
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(DisplayType.entries) { type ->
+                        FilterChip(
+                            selected = settings.displayType == type,
+                            onClick = { onSettingsChanged(settings.copy(displayType = type)) },
+                            label = { Text(type.label) }
+                        )
+                    }
+                }
+            }
+        }
+
+        item {
+            SettingsCard(title = "Scan burst", description = "${settings.scanMode.description} Captures ${settings.scanMode.burstFrames} analyzed frames per scan.") {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(ScanMode.entries) { mode ->
                         FilterChip(
@@ -935,8 +964,8 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
 
         item {
             ToggleSetting(
-                title = "Automatic scan",
-                description = "Continuously analyze the newest camera frame and lock only after several frames agree.",
+                title = "Auto-start scan burst",
+                description = "Start the short scan burst automatically after the scoreboard is centered for several frames.",
                 checked = settings.autoScan,
                 onCheckedChange = { onSettingsChanged(settings.copy(autoScan = it)) }
             )
@@ -944,8 +973,8 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
 
         item {
             ToggleSetting(
-                title = "Open results automatically",
-                description = "Jump to recommendations as soon as the lineup reaches the selected confidence mode.",
+                title = "Skip review when perfect",
+                description = "Open recommendations only when every detected hero is high-confidence. Otherwise the review screen stays open.",
                 checked = settings.autoOpenResults,
                 onCheckedChange = { onSettingsChanged(settings.copy(autoOpenResults = it)) }
             )
@@ -991,10 +1020,47 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         }
 
         item {
+            ToggleSetting(
+                title = "Help train accurate detection",
+                description = "After you review and correct a scan, save only the cropped scoreboard and hero cells locally. Nothing is uploaded automatically.",
+                checked = settings.collectTrainingData,
+                onCheckedChange = { onSettingsChanged(settings.copy(collectTrainingData = it)) }
+            )
+        }
+
+        item {
+            SettingsCard(
+                title = "Local training samples",
+                description = "$datasetCount reviewed scans · ${String.format(Locale.US, "%.1f", datasetSizeMb)} MB. Export them when you are ready to use them for model training."
+            ) {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(
+                        enabled = datasetCount > 0 && !datasetBusy,
+                        onClick = {
+                            settingsScope.launch {
+                                datasetBusy = true
+                                val share = withContext(Dispatchers.IO) { datasetCollector.createShareIntent() }
+                                datasetBusy = false
+                                share?.let { context.startActivity(Intent.createChooser(it, "Share HeroLens training samples")) }
+                            }
+                        }
+                    ) { Text(if (datasetBusy) "PREPARING…" else "EXPORT ZIP") }
+                    OutlinedButton(
+                        enabled = datasetCount > 0,
+                        onClick = {
+                            datasetCollector.clear()
+                            datasetRevision++
+                        }
+                    ) { Text("DELETE") }
+                }
+            }
+        }
+
+        item {
             SettingsCard(title = "Data and model", description = "Versioned components make future patch and model updates replaceable without redesigning the app.") {
                 Text("Hero data: ${HeroCatalog.DATA_VERSION}", fontWeight = FontWeight.Bold)
-                Text("Recommendation weights: V6 Explainable", fontWeight = FontWeight.Bold)
-                Text("Recognition: localized TV scoreboard · multi-crop portrait ensemble · multi-frame consensus · LiteRT model slot ready", fontWeight = FontWeight.Bold)
+                Text("Recommendation weights: V7 Explainable Coach", fontWeight = FontWeight.Bold)
+                Text("Recognition: tap-to-scan burst · scoreboard locator · review/correct workflow · LiteRT model slot ready", fontWeight = FontWeight.Bold)
                 Text("OTA endpoint is not configured in this MVP; updates are bundled with source releases.", style = MaterialTheme.typography.bodySmall)
             }
         }
@@ -1003,8 +1069,8 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
             Card(shape = RoundedCornerShape(18.dp)) {
                 Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
                     Text("Privacy", fontWeight = FontWeight.Bold)
-                    Text("Camera frames are analyzed in memory. V6 does not upload scan snapshots or require an account.")
-                    Text("History remains on this phone and can be cleared from the History tab.", style = MaterialTheme.typography.bodySmall)
+                    Text("Camera frames are analyzed in memory. Training samples are saved only when the opt-in setting is enabled and only after you review a scan.")
+                    Text("No training sample is uploaded automatically. You control export and deletion from this screen.", style = MaterialTheme.typography.bodySmall)
                     OutlinedButton(onClick = { onSettingsChanged(settings.copy(onboardingComplete = false)) }) {
                         Text("SHOW INTRO AGAIN")
                     }

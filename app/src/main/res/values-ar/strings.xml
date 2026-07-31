@@ -27,7 +27,7 @@
     <string name="results_explainer">تم ترتيب الاختيارات حسب المواجهات، الانسجام، الخريطة، مستوى إتقانك وتكلفة التبديل.</string>
     <string name="balanced_fallback">اختيار متوازن للسياق المحدد.</string>
     <string name="auto_camera_title">التعرّف التلقائي بالكاميرا</string>
-    <string name="auto_camera_description">افتح الماسح المباشر ووجّه الهاتف إلى لوحة النتائج وثبّته. تظهر الفرق والاقتراحات تلقائيًا.</string>
+    <string name="auto_camera_description">ضع لوحة النتائج داخل الإطار الكبير، ثم اضغط مسح وثبّت الهاتف لثوانٍ، وبعدها راجع الأبطال وصحّحهم.</string>
     <string name="open_camera_scanner">فتح ماسح الكاميرا</string>
     <string name="camera_scan">ماسح مباشر للوحة النتائج</string>
     <string name="camera_scan_hint">فحص مستمر على الجهاز مع رفض الضبابية وتأكيد النتائج عبر عدة إطارات. يتم حفظ صور الأبطال عند أول استخدام.</string>
@@ -49,9 +49,9 @@
     <string name="choose_own_row">أي صف من الحلفاء هو صفك؟ اختر الصف المميز في لوحة النتائج.</string>
 
     <string name="preparing_live_scan">جارٍ تجهيز الماسح المباشر…</string>
-    <string name="open_scoreboard_live">افتح لوحة النتائج وحاذِ المربعات العشرة. يبدأ الفحص تلقائيًا.</string>
+    <string name="open_scoreboard_live">ضع لوحتي الفريق الأزرق والأحمر داخل الإطار الكبير ثم اضغط مسح.</string>
     <string name="templates_unavailable">صور الأبطال غير متاحة. اتصل بالإنترنت ثم أعد فتح الماسح.</string>
-    <string name="live_auto_scan">فحص مباشر وتلقائي</string>
+    <string name="live_auto_scan">مسح سريع متعدد الإطارات</string>
     <string name="detecting_live">اكتشاف تلقائي · %1$d من 10 ثابتة</string>
     <string name="lineup_locked">تم تثبيت التشكيلة — جارٍ فتح الاقتراحات…</string>
     <string name="stable_slots">%1$d من 10 ثابتة · توافق %2$d إطارات</string>

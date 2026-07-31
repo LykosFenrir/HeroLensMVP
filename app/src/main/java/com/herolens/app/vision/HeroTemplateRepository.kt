@@ -76,7 +76,7 @@ class HeroTemplateRepository(private val context: Context) {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6.4")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.7.0")
         val temporary = File(destination.parentFile, "${destination.name}.part")
         return try {
             connection.inputStream.use { input ->

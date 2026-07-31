@@ -27,10 +27,10 @@
     <string name="results_explainer">Top choices ranked by matchup, synergy, map fit, comfort and switching cost.</string>
     <string name="balanced_fallback">Balanced fallback for the selected context.</string>
     <string name="auto_camera_title">Automatic camera recognition</string>
-    <string name="auto_camera_description">Open the live scanner, point the phone at the scoreboard, and hold steady. Teams and recommendations appear automatically.</string>
+    <string name="auto_camera_description">Center the scoreboard, tap Scan, hold steady for a short burst, then review and correct the detected teams.</string>
     <string name="open_camera_scanner">Open camera scanner</string>
     <string name="camera_scan">Live scoreboard scanner</string>
-    <string name="camera_scan_hint">Continuous on-device scanning with blur rejection and multi-frame confidence. The first use caches hero templates.</string>
+    <string name="camera_scan_hint">Short on-device scan bursts with blur rejection, multi-frame confidence and a review-before-results workflow.</string>
     <string name="close">Close</string>
     <string name="camera_permission_needed">Camera permission is required for automatic scoreboard scanning.</string>
     <string name="allow_camera">Allow camera</string>
@@ -49,9 +49,9 @@
     <string name="choose_own_row">Which ally row is yours? Tap the highlighted scoreboard row.</string>
 
     <string name="preparing_live_scan">Preparing live scanner…</string>
-    <string name="open_scoreboard_live">Open the scoreboard and align the ten boxes. Scanning is automatic.</string>
+    <string name="open_scoreboard_live">Center the blue and red scoreboard panels inside the large frame, then tap Scan.</string>
     <string name="templates_unavailable">Hero templates are unavailable. Connect to the internet and reopen the scanner.</string>
-    <string name="live_auto_scan">Live automatic scan</string>
+    <string name="live_auto_scan">Scan burst</string>
     <string name="detecting_live">Detecting automatically · %1$d/10 stable</string>
     <string name="lineup_locked">Lineup locked — opening recommendations…</string>
     <string name="stable_slots">%1$d/10 stable · %2$d-frame consensus</string>

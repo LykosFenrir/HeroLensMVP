@@ -24,13 +24,20 @@ enum class InputPlatform(val label: String) {
     CONSOLE("Console")
 }
 
+enum class DisplayType(val label: String) {
+    AUTO("Auto"),
+    TV("TV / console screen"),
+    LAPTOP("Laptop / monitor")
+}
+
 enum class ScanMode(
     val label: String,
     val description: String,
     val windowSize: Int,
     val minimumVotes: Int,
     val minimumConfidence: Float,
-    val intervalMs: Long
+    val intervalMs: Long,
+    val burstFrames: Int
 ) {
     FAST(
         label = "Fast",
@@ -38,7 +45,8 @@ enum class ScanMode(
         windowSize = 4,
         minimumVotes = 2,
         minimumConfidence = 0.48f,
-        intervalMs = 190L
+        intervalMs = 190L,
+        burstFrames = 6
     ),
     BALANCED(
         label = "Balanced",
@@ -46,7 +54,8 @@ enum class ScanMode(
         windowSize = 5,
         minimumVotes = 3,
         minimumConfidence = 0.54f,
-        intervalMs = 270L
+        intervalMs = 270L,
+        burstFrames = 9
     ),
     ACCURATE(
         label = "Accurate",
@@ -54,21 +63,24 @@ enum class ScanMode(
         windowSize = 7,
         minimumVotes = 4,
         minimumConfidence = 0.60f,
-        intervalMs = 330L
+        intervalMs = 330L,
+        burstFrames = 12
     )
 }
 
 data class ScannerSettings(
     val rank: RankTier = RankTier.UNRANKED,
     val inputPlatform: InputPlatform = InputPlatform.PC,
-    val autoScan: Boolean = true,
-    val autoOpenResults: Boolean = true,
+    val displayType: DisplayType = DisplayType.AUTO,
+    val autoScan: Boolean = false,
+    val autoOpenResults: Boolean = false,
     val showDetections: Boolean = true,
     val hapticFeedback: Boolean = true,
     val defaultZoom: Float = 1f,
     val autoZoom: Boolean = true,
     val scanMode: ScanMode = ScanMode.BALANCED,
     val preferredLayout: ScoreboardLayout = ScoreboardLayout.AUTO,
+    val collectTrainingData: Boolean = false,
     val onboardingComplete: Boolean = false
 )
 
@@ -94,24 +106,31 @@ data class ScanHistoryEntry(
 class AppStore(context: Context) {
     private val preferences = context.getSharedPreferences("herolens_v5", Context.MODE_PRIVATE)
 
-    fun loadSettings(): ScannerSettings = ScannerSettings(
+    fun loadSettings(): ScannerSettings {
+        val schema = preferences.getInt(KEY_SETTINGS_SCHEMA, 0)
+        return ScannerSettings(
         rank = enumValue(KEY_RANK, RankTier.UNRANKED),
         inputPlatform = enumValue(KEY_INPUT_PLATFORM, InputPlatform.PC),
-        autoScan = preferences.getBoolean(KEY_AUTO_SCAN, true),
-        autoOpenResults = preferences.getBoolean(KEY_AUTO_OPEN_RESULTS, true),
+        displayType = enumValue(KEY_DISPLAY_TYPE, DisplayType.AUTO),
+        autoScan = if (schema >= 7) preferences.getBoolean(KEY_AUTO_SCAN, false) else false,
+        autoOpenResults = if (schema >= 7) preferences.getBoolean(KEY_AUTO_OPEN_RESULTS, false) else false,
         showDetections = preferences.getBoolean(KEY_SHOW_DETECTIONS, true),
         hapticFeedback = preferences.getBoolean(KEY_HAPTICS, true),
         defaultZoom = preferences.getFloat(KEY_ZOOM, 1f).coerceIn(1f, 5f),
         autoZoom = preferences.getBoolean(KEY_AUTO_ZOOM, true),
         scanMode = enumValue(KEY_SCAN_MODE, ScanMode.BALANCED),
         preferredLayout = enumValue(KEY_LAYOUT, ScoreboardLayout.AUTO),
+        collectTrainingData = preferences.getBoolean(KEY_COLLECT_TRAINING_DATA, false),
         onboardingComplete = preferences.getBoolean(KEY_ONBOARDING, false)
     )
+    }
 
     fun saveSettings(settings: ScannerSettings) {
         preferences.edit()
+            .putInt(KEY_SETTINGS_SCHEMA, 7)
             .putString(KEY_RANK, settings.rank.name)
             .putString(KEY_INPUT_PLATFORM, settings.inputPlatform.name)
+            .putString(KEY_DISPLAY_TYPE, settings.displayType.name)
             .putBoolean(KEY_AUTO_SCAN, settings.autoScan)
             .putBoolean(KEY_AUTO_OPEN_RESULTS, settings.autoOpenResults)
             .putBoolean(KEY_SHOW_DETECTIONS, settings.showDetections)
@@ -120,6 +139,7 @@ class AppStore(context: Context) {
             .putBoolean(KEY_AUTO_ZOOM, settings.autoZoom)
             .putString(KEY_SCAN_MODE, settings.scanMode.name)
             .putString(KEY_LAYOUT, settings.preferredLayout.name)
+            .putBoolean(KEY_COLLECT_TRAINING_DATA, settings.collectTrainingData)
             .putBoolean(KEY_ONBOARDING, settings.onboardingComplete)
             .apply()
     }
@@ -219,8 +239,10 @@ class AppStore(context: Context) {
     }
 
     private companion object {
+        const val KEY_SETTINGS_SCHEMA = "settings_schema"
         const val KEY_RANK = "rank"
         const val KEY_INPUT_PLATFORM = "input_platform"
+        const val KEY_DISPLAY_TYPE = "display_type"
         const val KEY_AUTO_SCAN = "auto_scan"
         const val KEY_AUTO_OPEN_RESULTS = "auto_open_results"
         const val KEY_SHOW_DETECTIONS = "show_detections"
@@ -230,6 +252,7 @@ class AppStore(context: Context) {
         const val KEY_SCAN_MODE = "scan_mode"
         const val KEY_LAYOUT = "layout"
         const val KEY_ONBOARDING = "onboarding_complete"
+        const val KEY_COLLECT_TRAINING_DATA = "collect_training_data"
         const val KEY_ROLE = "role"
         const val KEY_MAP_PROFILE = "map_profile"
         const val KEY_CURRENT_HERO = "current_hero"
