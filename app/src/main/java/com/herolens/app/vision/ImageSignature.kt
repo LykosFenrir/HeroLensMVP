@@ -56,27 +56,53 @@ object ScoreboardSlots {
     ): List<List<Pair<TeamSide, NormalizedRect>>> {
         require(layout != ScoreboardLayout.AUTO)
         require(teamSize in 5..6)
-        // Three compact profiles are enough after panel localization. Older builds
-        // evaluated 32 full combinations per frame, which was too slow on phones.
-        val portraitOffsets = listOf(0.030f, 0.070f, 0.110f)
-        val widthScales = listOf(0.095f)
+
+        /*
+         * The colour locator finds the blue/red tables, but the coloured area can
+         * include a white header, role-icon gutter or a little empty padding.  V6.3
+         * used only three fixed X offsets and no vertical trim, which is why boxes
+         * sometimes landed on role icons or started one/two rows too high.  V6.4
+         * deliberately generates a wider geometry search; TemplateHeroDetector
+         * performs a cheap pre-ranking pass and fully classifies only the best few.
+         */
+        val portraitOffsets = listOf(0.050f, 0.090f, 0.130f, 0.170f)
+        val widthScales = listOf(0.080f, 0.105f)
+        val trimProfiles = listOf(
+            PanelTrim(0.00f, 0.00f, 0.00f, 0.00f),
+            PanelTrim(0.06f, 0.02f, 0.02f, 0.01f),
+            PanelTrim(0.12f, 0.03f, 0.03f, 0.02f),
+            PanelTrim(0.18f, 0.04f, 0.05f, 0.03f),
+            // Some browser screenshots connect a larger blue toolbar/header to the
+            // ally table while the enemy panel remains tightly cropped.
+            PanelTrim(0.24f, 0.03f, 0.03f, 0.02f)
+        )
         return buildList {
             portraitOffsets.forEach { offset ->
                 widthScales.forEach { widthScale ->
-                    add(
-                        buildLocalizedProfile(
-                            allyPanel = region.allyPanel,
-                            enemyPanel = region.enemyPanel,
-                            layout = layout,
-                            teamSize = teamSize,
-                            portraitOffset = offset,
-                            portraitWidthScale = widthScale
+                    trimProfiles.forEach { trim ->
+                        add(
+                            buildLocalizedProfile(
+                                allyPanel = region.allyPanel,
+                                enemyPanel = region.enemyPanel,
+                                layout = layout,
+                                teamSize = teamSize,
+                                portraitOffset = offset,
+                                portraitWidthScale = widthScale,
+                                trim = trim
+                            )
                         )
-                    )
+                    }
                 }
             }
         }
     }
+
+    private data class PanelTrim(
+        val allyTop: Float,
+        val allyBottom: Float,
+        val enemyTop: Float,
+        val enemyBottom: Float
+    )
 
     private fun buildLocalizedProfile(
         allyPanel: NormalizedRect,
@@ -84,10 +110,33 @@ object ScoreboardSlots {
         layout: ScoreboardLayout,
         teamSize: Int,
         portraitOffset: Float,
-        portraitWidthScale: Float
+        portraitWidthScale: Float,
+        trim: PanelTrim
     ): List<Pair<TeamSide, NormalizedRect>> = buildList {
-        addAll(panelSlots(TeamSide.ALLY, allyPanel, layout, teamSize, portraitOffset, portraitWidthScale))
-        addAll(panelSlots(TeamSide.ENEMY, enemyPanel, layout, teamSize, portraitOffset, portraitWidthScale))
+        addAll(
+            panelSlots(
+                TeamSide.ALLY,
+                allyPanel,
+                layout,
+                teamSize,
+                portraitOffset,
+                portraitWidthScale,
+                trim.allyTop,
+                trim.allyBottom
+            )
+        )
+        addAll(
+            panelSlots(
+                TeamSide.ENEMY,
+                enemyPanel,
+                layout,
+                teamSize,
+                portraitOffset,
+                portraitWidthScale,
+                trim.enemyTop,
+                trim.enemyBottom
+            )
+        )
     }
 
     private fun panelSlots(
@@ -96,10 +145,15 @@ object ScoreboardSlots {
         layout: ScoreboardLayout,
         teamSize: Int,
         portraitOffset: Float,
-        portraitWidthScale: Float
+        portraitWidthScale: Float,
+        topTrim: Float,
+        bottomTrim: Float
     ): List<Pair<TeamSide, NormalizedRect>> {
-        val rowHeight = panel.height / teamSize
-        val halfHeight = rowHeight * 0.46f
+        val contentTop = panel.top + panel.height * topTrim.coerceIn(0f, 0.35f)
+        val contentBottom = panel.bottom - panel.height * bottomTrim.coerceIn(0f, 0.20f)
+        val contentHeight = (contentBottom - contentTop).coerceAtLeast(panel.height * 0.45f)
+        val rowHeight = contentHeight / teamSize
+        val halfHeight = rowHeight * 0.43f
         val halfWidth = panel.width * portraitWidthScale / 2f
         val centerX = if (layout == ScoreboardLayout.PORTRAITS_LEFT) {
             panel.left + panel.width * portraitOffset
@@ -107,7 +161,7 @@ object ScoreboardSlots {
             panel.right - panel.width * portraitOffset
         }
         return (0 until teamSize).map { slot ->
-            val centerY = panel.top + rowHeight * (slot + 0.5f)
+            val centerY = contentTop + rowHeight * (slot + 0.5f)
             team to NormalizedRect(
                 (centerX - halfWidth).coerceIn(0f, 1f),
                 (centerY - halfHeight).coerceIn(0f, 1f),
@@ -136,7 +190,11 @@ object ScoreboardSlots {
         val offsets = listOf(
             0f to 0f,
             -0.006f to 0f,
-            0.006f to 0f
+            0.006f to 0f,
+            -0.012f to 0f,
+            0.012f to 0f,
+            0f to -0.004f,
+            0f to 0.004f
         )
         val shifted = offsets.map { (dx, dy) -> shift(rect, dx, dy) }
         return shifted + resize(rect, 0.88f) + resize(rect, 1.12f)
@@ -217,6 +275,65 @@ object SignatureMath {
             }
         }
         return ImageSignature(normalized, normalize(edges), histogram, differenceHash(gray))
+    }
+
+    /**
+     * Geometry-only portrait likelihood used to rank candidate slot layouts before
+     * expensive hero classification. Faces/portraits have more local variation and
+     * colour diversity than the flat cyan/red table or the white role-icon gutter.
+     */
+    fun textureScore(crop: CroppedImage): Float {
+        if (crop.width < 2 || crop.height < 2 || crop.rgba.isEmpty()) return 0f
+        val sampleW = min(24, crop.width)
+        val sampleH = min(24, crop.height)
+        var sum = 0f
+        var sumSq = 0f
+        var gradients = 0f
+        var saturationSum = 0f
+        val histogram = IntArray(32)
+        var count = 0
+        val luminance = FloatArray(sampleW * sampleH)
+        for (y in 0 until sampleH) {
+            val sy = ((y + 0.5f) * crop.height / sampleH).toInt().coerceIn(0, crop.height - 1)
+            for (x in 0 until sampleW) {
+                val sx = ((x + 0.5f) * crop.width / sampleW).toInt().coerceIn(0, crop.width - 1)
+                val index = (sy * crop.width + sx) * 4
+                val r = crop.rgba[index].toInt() and 0xff
+                val g = crop.rgba[index + 1].toInt() and 0xff
+                val b = crop.rgba[index + 2].toInt() and 0xff
+                val lum = (0.2126f * r + 0.7152f * g + 0.0722f * b) / 255f
+                luminance[y * sampleW + x] = lum
+                sum += lum
+                sumSq += lum * lum
+                saturationSum += (max(r, max(g, b)) - min(r, min(g, b))) / 255f
+                val rb = (r / 64).coerceIn(0, 3)
+                val gb = (g / 64).coerceIn(0, 3)
+                val bb = (b / 128).coerceIn(0, 1)
+                histogram[(rb * 4 + gb) * 2 + bb]++
+                count++
+            }
+        }
+        for (y in 1 until sampleH) {
+            for (x in 1 until sampleW) {
+                val here = luminance[y * sampleW + x]
+                gradients += kotlin.math.abs(here - luminance[y * sampleW + x - 1])
+                gradients += kotlin.math.abs(here - luminance[(y - 1) * sampleW + x])
+            }
+        }
+        val mean = sum / max(1, count)
+        val variance = max(0f, sumSq / max(1, count) - mean * mean)
+        val gradientMean = gradients / max(1, (sampleW - 1) * (sampleH - 1) * 2)
+        var entropy = 0f
+        histogram.forEach { bin ->
+            if (bin > 0) {
+                val p = bin.toFloat() / max(1, count)
+                entropy -= p * kotlin.math.ln(p)
+            }
+        }
+        entropy /= kotlin.math.ln(histogram.size.toFloat())
+        val saturation = saturationSum / max(1, count)
+        return (kotlin.math.sqrt(variance) * 0.28f + gradientMean * 1.45f + entropy * 0.42f + saturation * 0.10f)
+            .coerceIn(0f, 1f)
     }
 
     fun quickSimilarity(a: ImageSignature, b: ImageSignature): Float {

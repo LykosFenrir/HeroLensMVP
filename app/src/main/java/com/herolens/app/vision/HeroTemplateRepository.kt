@@ -76,7 +76,7 @@ class HeroTemplateRepository(private val context: Context) {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6.3")
+        connection.setRequestProperty("User-Agent", "HeroLens/0.6.4")
         val temporary = File(destination.parentFile, "${destination.name}.part")
         return try {
             connection.inputStream.use { input ->
@@ -193,7 +193,7 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private fun signatureCacheFile(): File =
-        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_3-team-backgrounds.bin")
+        File(context.filesDir, "hero-signatures-${HeroCatalog.DATA_VERSION}-v6_4-calibrated.bin")
 
     private fun readSignatureCache(): Map<String, List<ImageSignature>>? {
         val file = signatureCacheFile()
@@ -259,7 +259,7 @@ class HeroTemplateRepository(private val context: Context) {
     }
 
     private companion object {
-        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_3_TEAM_BACKGROUNDS"
+        const val CACHE_MAGIC = "HEROLENS_SIGNATURE_V6_4_CALIBRATED"
     }
 }
 

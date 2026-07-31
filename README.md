@@ -1,8 +1,12 @@
-# HeroLens V6.3 Validated Scanner
+# HeroLens V6.4 Calibrated Scanner
 
 HeroLens is an unofficial Android-first Overwatch hero-pick coach. It can scan a scoreboard with the rear camera, recommend three heroes and explain the enemy counters, ally synergies, map fit, player-comfort impact and switch timing behind every suggestion.
 
-## What V6.3 includes
+## V6.4 scanner correction
+
+V6.4 adds adaptive portrait-column/header geometry search, calibrated confidence, stronger false-positive rejection, and a 5v5 preference based on the latest ASUS laptop and Hisense/PS5 real-device screenshots. See `V6_4_CONFIDENCE_AND_GEOMETRY_FIX.md`.
+
+## What V6.4 includes
 
 - Fast, Balanced and Accurate live-scan modes.
 - Automatic or fixed scoreboard portrait-side detection.

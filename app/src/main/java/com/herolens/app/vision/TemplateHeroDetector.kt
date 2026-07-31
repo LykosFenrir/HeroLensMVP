@@ -120,15 +120,17 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val templates = cachedTemplates.orEmpty()
         if (templates.isEmpty()) return noTemplates(teamSize, region)
         val profiles = ScoreboardSlots.localizedProfiles(region, layout, teamSize)
-        return profiles.mapIndexed { profileIndex, slots ->
+        val rankedProfiles = rankGeometryProfiles(frame, profiles, templates, limit = 4)
+        return rankedProfiles.mapIndexed { profileIndex, ranked ->
             detectProfile(
                 frame = frame,
-                slots = slots,
+                slots = ranked.slots,
                 templates = templates,
                 teamSize = teamSize,
                 region = region,
+                profileScore = ranked.score,
                 onProgress = { position ->
-                    onProgress("Recognizing ${teamSize}v${teamSize} · ${profileIndex + 1}/${profiles.size} · $position/${teamSize * 2}")
+                    onProgress("Recognizing ${teamSize}v${teamSize} · ${profileIndex + 1}/${rankedProfiles.size} · $position/${teamSize * 2}")
                 }
             )
         }.maxByOrNull(::resultQuality)
@@ -149,6 +151,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                 templates = templates,
                 teamSize = 5,
                 region = null,
+                profileScore = 0f,
                 onProgress = { position -> onProgress("Fallback profile ${profileIndex + 1} · $position/10") }
             )
         }.maxByOrNull(::resultQuality)
@@ -161,6 +164,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         templates: Map<String, List<ImageSignature>>,
         teamSize: Int,
         region: ScoreboardRegion?,
+        profileScore: Float,
         onProgress: (Int) -> Unit
     ): DetectionResult {
         val usedByTeam = mutableMapOf<TeamSide, MutableSet<String>>()
@@ -202,14 +206,26 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val best = available.first()
             val second = available.getOrNull(1)?.second ?: -1f
             val third = available.getOrNull(2)?.second ?: -1f
-            val raw = ((best.second + 1f) / 2f).coerceIn(0f, 1f)
-            val margin = (best.second - second).coerceAtLeast(0f)
-            val separation = (best.second - third).coerceAtLeast(0f)
-            val confidence = (raw * 0.64f + margin * 1.18f + separation * 0.36f).coerceIn(0f, 0.99f)
-            // Multi-frame stabilization is the final false-positive guard. Keep the
-            // per-frame gate permissive enough for camera blur, TV colour casts and
-            // small laptop portraits, then require repeated agreement before import.
-            val accepted = confidence >= 0.27f && raw >= 0.41f && margin >= 0.0015f
+            val bestScore = best.second.coerceIn(-1f, 1f)
+            val margin = (bestScore - second).coerceAtLeast(0f)
+            val separation = (bestScore - third).coerceAtLeast(0f)
+
+            /*
+             * V6.3 mapped a neutral correlation of 0.0 to 50% confidence by using
+             * (score + 1) / 2. Random role icons and flat panel cells therefore
+             * appeared as believable 47–61% hero matches and could stabilize over
+             * several frames. V6.4 calibrates confidence around the useful positive
+             * correlation range and requires a real lead over the runner-up.
+             */
+            val absoluteEvidence = ((bestScore - 0.08f) / 0.52f).coerceIn(0f, 1f)
+            val marginEvidence = (margin / 0.16f).coerceIn(0f, 1f)
+            val separationEvidence = (separation / 0.24f).coerceIn(0f, 1f)
+            val confidence = (
+                absoluteEvidence * 0.68f +
+                    marginEvidence * 0.24f +
+                    separationEvidence * 0.08f
+                ).coerceIn(0f, 0.99f)
+            val accepted = bestScore >= 0.18f && margin >= 0.018f && confidence >= 0.30f
             if (accepted) used += best.first
             HeroDetection(
                 heroId = best.first.takeIf { accepted },
@@ -217,7 +233,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                 slot = index % teamSize,
                 confidence = confidence,
                 alternatives = available.take(3).map { (heroId, score) ->
-                    HeroCandidate(heroId, ((score + 1f) / 2f).coerceIn(0f, 1f))
+                    HeroCandidate(heroId, ((score - 0.08f) / 0.52f).coerceIn(0f, 1f))
                 },
                 bounds = rect
             )
@@ -233,8 +249,48 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             warnings = warnings,
             scoreboardRegion = region,
             slotRects = slots,
-            teamSize = teamSize
+            teamSize = teamSize,
+            profileScore = profileScore
         )
+    }
+
+    private data class RankedProfile(
+        val slots: List<Pair<TeamSide, NormalizedRect>>,
+        val score: Float
+    )
+
+    /**
+     * Scores many candidate portrait-column/row layouts with cheap hash, histogram
+     * and texture checks. Only the strongest four layouts proceed to full 32×32
+     * luminance/edge comparison, keeping the wider geometry search fast enough for
+     * live CameraX analysis.
+     */
+    private fun rankGeometryProfiles(
+        frame: ScoreboardFrame,
+        profiles: List<List<Pair<TeamSide, NormalizedRect>>>,
+        templates: Map<String, List<ImageSignature>>,
+        limit: Int
+    ): List<RankedProfile> {
+        val representatives = templates.mapValues { (_, variants) -> variants.take(1) }
+        return profiles.asSequence().map { slots ->
+            val rowScores = slots.map { (_, rect) ->
+                val crop = SignatureMath.crop(frame, rect)
+                val signature = SignatureMath.signature(crop.rgba, crop.width, crop.height)
+                val templateScore = representatives.values.maxOfOrNull { variants ->
+                    variants.maxOf { template -> SignatureMath.quickSimilarity(signature, template) }
+                } ?: 0f
+                val texture = SignatureMath.textureScore(crop)
+                templateScore * 0.70f + texture * 0.30f
+            }
+            val sorted = rowScores.sorted()
+            val median = if (sorted.isEmpty()) 0f else sorted[sorted.size / 2]
+            val mean = if (rowScores.isEmpty()) 0f else rowScores.average().toFloat()
+            val weakest = sorted.firstOrNull() ?: 0f
+            RankedProfile(slots, (median * 0.56f + mean * 0.29f + weakest * 0.15f).coerceIn(0f, 1f))
+        }
+            .sortedByDescending(RankedProfile::score)
+            .take(limit.coerceAtLeast(1))
+            .toList()
     }
 
     private fun noTemplates(teamSize: Int, region: ScoreboardRegion?): DetectionResult = DetectionResult(
@@ -259,6 +315,10 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val uniqueness = accepted.groupBy { it.team }.values
             .map { team -> team.mapNotNull { it.heroId }.distinct().size / maxOf(1f, team.size.toFloat()) }
             .average().toFloat().takeIf { !it.isNaN() } ?: 0f
-        return (coverage * 0.56f + confidence * 0.36f + uniqueness * 0.08f).coerceIn(0f, 1f)
+        var quality = coverage * 0.45f + confidence * 0.31f + uniqueness * 0.07f + result.profileScore * 0.17f
+        // Overwatch 2's normal scoreboard is 5v5. Do not switch to 6v6 merely
+        // because an extra row division happens to create weak random matches.
+        if (result.teamSize == 6 && accepted.size < 10) quality -= 0.075f
+        return quality.coerceIn(0f, 1f)
     }
 }

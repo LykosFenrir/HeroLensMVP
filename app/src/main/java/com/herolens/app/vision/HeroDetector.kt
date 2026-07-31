@@ -62,7 +62,8 @@ data class DetectionResult(
     val warnings: List<String> = emptyList(),
     val scoreboardRegion: ScoreboardRegion? = null,
     val slotRects: List<Pair<TeamSide, NormalizedRect>> = emptyList(),
-    val teamSize: Int = 5
+    val teamSize: Int = 5,
+    val profileScore: Float = 0f
 )
 
 data class AutoDetectionResult(

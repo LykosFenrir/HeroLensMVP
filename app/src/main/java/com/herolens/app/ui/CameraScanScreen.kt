@@ -526,6 +526,8 @@ fun CameraScanScreen(
                                                         detectedTeamSize = snapshot.teamSize
                                                         status = when {
                                                             snapshot.ready -> context.getString(R.string.lineup_locked)
+                                                            snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 && locatorState == ScoreboardSearchState.FOUND ->
+                                                                "Scoreboard aligned — hero matches are below confidence. Move closer, focus, or tap FRAME"
                                                             snapshot.framesObserved >= 8 && snapshot.stableSlots == 0 ->
                                                                 "Move closer — make the TV scoreboard fill the frame"
                                                             else -> context.getString(R.string.detecting_live, snapshot.stableSlots)
@@ -634,25 +636,28 @@ fun CameraScanScreen(
                     }
                 }
 
-                Surface(
-                    modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .statusBarsPadding()
-                        .padding(10.dp)
-                        .clickable { closeScanner() },
-                    color = Color.Black.copy(alpha = 0.78f),
-                    shape = RoundedCornerShape(14.dp),
-                    tonalElevation = 6.dp
-                ) {
-                    Text(
-                        text = "← EXIT SCAN",
-                        modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
-                        color = Color.White,
-                        fontWeight = FontWeight.Black
-                    )
-                }
-
+                // Portrait already has CLOSE above the preview and Android Back is
+                // handled globally. Keeping a second large EXIT button inside the
+                // portrait preview covered the first ally rows during recognition.
                 if (isLandscape) {
+                    Surface(
+                        modifier = Modifier
+                            .align(Alignment.TopStart)
+                            .statusBarsPadding()
+                            .padding(10.dp)
+                            .clickable { closeScanner() },
+                        color = Color.Black.copy(alpha = 0.78f),
+                        shape = RoundedCornerShape(14.dp),
+                        tonalElevation = 6.dp
+                    ) {
+                        Text(
+                            text = "← EXIT SCAN",
+                            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+                            color = Color.White,
+                            fontWeight = FontWeight.Black
+                        )
+                    }
+
                     Surface(
                         modifier = Modifier
                             .align(Alignment.TopCenter)

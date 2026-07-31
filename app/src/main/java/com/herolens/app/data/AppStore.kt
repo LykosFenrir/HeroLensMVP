@@ -37,7 +37,7 @@ enum class ScanMode(
         description = "Locks quickly when the phone and scoreboard are already aligned.",
         windowSize = 4,
         minimumVotes = 2,
-        minimumConfidence = 0.40f,
+        minimumConfidence = 0.48f,
         intervalMs = 190L
     ),
     BALANCED(
@@ -45,7 +45,7 @@ enum class ScanMode(
         description = "Recommended mix of speed and protection against one-frame mistakes.",
         windowSize = 5,
         minimumVotes = 3,
-        minimumConfidence = 0.45f,
+        minimumConfidence = 0.54f,
         intervalMs = 270L
     ),
     ACCURATE(
@@ -53,7 +53,7 @@ enum class ScanMode(
         description = "Uses more agreeing frames for glare, distant monitors and difficult angles.",
         windowSize = 7,
         minimumVotes = 4,
-        minimumConfidence = 0.50f,
+        minimumConfidence = 0.60f,
         intervalMs = 330L
     )
 }
