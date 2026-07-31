@@ -48,7 +48,8 @@ jobs:
             --samples-per-class "${{ inputs.samples_per_class }}" \
             --scoreboard-samples-per-class "${{ inputs.scoreboard_samples_per_class }}" \
             --epochs "${{ inputs.epochs }}" \
-            --benchmark-scoreboards "${{ inputs.benchmark_scoreboards }}"
+            --benchmark-scoreboards "${{ inputs.benchmark_scoreboards }}" \
+            --enforce-gates
 
       - name: Validate ONNX file
         run: |
@@ -65,6 +66,8 @@ jobs:
           assert metrics["best_scoreboard_crop_validation_accuracy"] >= 0.72
           assert metrics["scoreboard_benchmark_scenes"] >= 500
           assert metrics["scoreboard_benchmark_accuracy"] >= 0.62
+          assert metrics["scoreboard_benchmark_5v5_accuracy"] >= 0.58
+          assert metrics["scoreboard_benchmark_6v6_accuracy"] >= 0.58
           PY
 
       - name: Commit trained model
