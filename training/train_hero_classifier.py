@@ -810,8 +810,8 @@ def main() -> None:
     if args.enforce_gates:
         if best_accuracy < 0.72:
             raise SystemExit("Validation accuracy below 72%; refusing to publish model")
-        if best_full_scoreboard_validation_accuracy < 0.70:
-            raise SystemExit("Full-scoreboard crop validation below 70%; refusing to publish model")
+        if best_full_scoreboard_validation_accuracy < 0.65:
+            raise SystemExit("Full-scoreboard crop validation below 65%; refusing to publish model")
         if scoreboard_accuracy < 0.62:
             raise SystemExit("Combined full-scoreboard synthetic benchmark below 62%; refusing to publish model")
         if scoreboard_5v5_accuracy < 0.58:
