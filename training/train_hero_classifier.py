@@ -311,17 +311,32 @@ def make_scoreboard_scene(
         draw.line((x1, y1, x2, y2), fill=(255, 255, 255, rng.randint(2, 15)), width=rng.randint(1, 3))
 
     panel_width = rng.randint(470, 650)
-    row_height = rng.randint(33, 43)
     team_size = 6 if team_size == 6 else 5
-    panel_height = row_height * team_size + rng.randint(3, 11)
+
+    # Keep both panels fully inside the 960x540 benchmark canvas. The original
+    # V8.3 generator chose a 33-43 px row height before accounting for twelve
+    # rows. Some 6v6 combinations were taller than the canvas, which produced
+    # negative portrait boxes and made PIL reject a crop whose lower coordinate
+    # was above its upper coordinate.
+    top_margin = rng.randint(28, 55)
+    bottom_margin = rng.randint(18, 32)
+    gap = rng.randint(24, 48) if team_size == 6 else rng.randint(30, 60)
+    panel_extra = rng.randint(3, 11)
+    available_for_panels = height - top_margin - bottom_margin - gap
+    max_row_height = max(22, (available_for_panels // 2 - panel_extra) // team_size)
+    preferred_min = 27 if team_size == 6 else 33
+    preferred_max = 37 if team_size == 6 else 43
+    row_high = max(22, min(preferred_max, max_row_height))
+    row_low = min(preferred_min, row_high)
+    row_height = rng.randint(row_low, row_high)
+    panel_height = row_height * team_size + panel_extra
+
     left = rng.randint(70, max(71, width - panel_width - 55))
-    top = rng.randint(45, 95)
-    gap = rng.randint(30, 60)
+    used_height = panel_height * 2 + gap
+    latest_top = max(top_margin, height - bottom_margin - used_height)
+    top = rng.randint(top_margin, latest_top)
     blue_top = top
     red_top = blue_top + panel_height + gap
-    if red_top + panel_height > height - 20:
-        red_top = height - panel_height - 20
-        blue_top = red_top - panel_height - gap
 
     total_players = team_size * 2
     chosen = rng.sample(hero_ids, total_players) if len(hero_ids) >= total_players else [rng.choice(hero_ids) for _ in range(total_players)]
@@ -414,12 +429,11 @@ class ScoreboardBenchmarkDataset(Dataset):
         rng = random.Random(self.seed + scene_index * 1_003 + slot)
         pad_x = max(1, int((right - left) * rng.uniform(0.02, 0.13)))
         pad_y = max(1, int((bottom - top) * rng.uniform(0.01, 0.10)))
-        crop = image.crop((
-            max(0, left - pad_x),
-            max(0, top - pad_y),
-            min(image.width, right + pad_x),
-            min(image.height, bottom + pad_y),
-        ))
+        crop_left = max(0, min(image.width - 1, left - pad_x))
+        crop_top = max(0, min(image.height - 1, top - pad_y))
+        crop_right = max(crop_left + 1, min(image.width, right + pad_x))
+        crop_bottom = max(crop_top + 1, min(image.height, bottom + pad_y))
+        crop = image.crop((crop_left, crop_top, crop_right, crop_bottom))
         return self.transform(crop), self.by_label[hero_id]
 
 
