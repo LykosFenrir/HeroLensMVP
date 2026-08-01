@@ -36,10 +36,31 @@ PORTRAIT_MANIFEST = ROOT / "app/src/main/assets/hero_portraits.json"
 MODEL_DIR = ROOT / "app/src/main/assets/model"
 CACHE_DIR = ROOT / "training/cache/portraits"
 REAL_DIR = ROOT / "training/real_samples"
+REAL_MANIFEST = REAL_DIR / "manifest.json"
 INPUT_SIZE = 96
 UNKNOWN = "__unknown__"
 MEAN = (0.485, 0.456, 0.406)
 STD = (0.229, 0.224, 0.225)
+
+
+class RandomLowResolution:
+    """Reproduce the tiny portrait raster seen when a TV occupies part of a frame."""
+
+    def __init__(self, minimum: int = 16, maximum: int = 42, probability: float = 0.85):
+        self.minimum = minimum
+        self.maximum = maximum
+        self.probability = probability
+
+    def __call__(self, image: Image.Image) -> Image.Image:
+        if random.random() >= self.probability:
+            return image
+        short_side = random.randint(self.minimum, self.maximum)
+        scale = short_side / max(1, min(image.size))
+        small = image.resize(
+            (max(8, round(image.width * scale)), max(8, round(image.height * scale))),
+            Image.Resampling.BILINEAR,
+        )
+        return small.resize(image.size, Image.Resampling.BILINEAR)
 
 
 def parse_args() -> argparse.Namespace:
@@ -50,6 +71,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--scoreboard-validation-per-class", type=int, default=6)
     parser.add_argument("--full-scoreboard-train-scenes-per-layout", type=int, default=120)
     parser.add_argument("--full-scoreboard-validation-scenes-per-layout", type=int, default=24)
+    parser.add_argument(
+        "--real-samples-per-image",
+        type=int,
+        default=54,
+        help="Augmented training variants generated from each reviewed real-TV crop",
+    )
     parser.add_argument("--unknown-samples", type=int, default=220)
     parser.add_argument("--epochs", type=int, default=7)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -591,27 +618,48 @@ class ScoreboardCropDataset(Dataset):
 
 
 class RealCropDataset(Dataset):
-    def __init__(self, labels: list[str]):
+    """Reviewed real-device portrait crops kept separate by train/validation split."""
+
+    def __init__(self, labels: list[str], split: str, repeats: int = 1):
+        if split not in {"train", "validation"}:
+            raise ValueError(f"Unsupported real-sample split: {split}")
         self.items: list[tuple[Path, int]] = []
+        self.repeats = max(1, repeats) if split == "train" else 1
         by_label = {label: index for index, label in enumerate(labels)}
-        if REAL_DIR.exists():
-            for folder in REAL_DIR.iterdir():
+        split_dir = REAL_DIR / split
+        if split_dir.exists():
+            for folder in split_dir.iterdir():
                 if not folder.is_dir() or folder.name not in by_label:
                     continue
                 for path in folder.rglob("*"):
                     if path.suffix.lower() in {".jpg", ".jpeg", ".png", ".webp"}:
                         self.items.append((path, by_label[folder.name]))
-        self.transform = transforms.Compose([
-            transforms.Resize((INPUT_SIZE, INPUT_SIZE), antialias=True),
-            transforms.ToTensor(),
-            transforms.Normalize(MEAN, STD),
-        ])
+        self.transform = transforms.Compose(
+            [
+                transforms.RandomPerspective(distortion_scale=0.08, p=0.35),
+                transforms.RandomAffine(
+                    degrees=2.0, translate=(0.07, 0.07), scale=(0.86, 1.12), shear=1.0
+                ),
+                RandomLowResolution(),
+                transforms.ColorJitter(brightness=0.18, contrast=0.18, saturation=0.12, hue=0.02),
+                transforms.RandomApply([transforms.GaussianBlur(3, sigma=(0.1, 0.8))], p=0.25),
+                transforms.Resize((INPUT_SIZE, INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN, STD),
+            ]
+            if split == "train"
+            else [
+                transforms.Resize((INPUT_SIZE, INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN, STD),
+            ]
+        )
 
     def __len__(self):
-        return len(self.items)
+        return len(self.items) * self.repeats
 
     def __getitem__(self, index):
-        path, target = self.items[index]
+        path, target = self.items[index % len(self.items)]
         return self.transform(Image.open(path).convert("RGB")), target
 
 
@@ -629,6 +677,53 @@ def evaluate(model: nn.Module, loader: DataLoader, device: torch.device) -> tupl
             correct += (logits.argmax(1) == targets).sum().item()
             total += targets.size(0)
     return correct / max(1, total), loss_sum / max(1, total)
+
+
+def evaluate_real_groups(
+    model: nn.Module, dataset: RealCropDataset, device: torch.device
+) -> tuple[float, float, int]:
+    """Average held-out crop logits per scoreboard slot, matching app consensus."""
+    model.eval()
+    grouped: dict[tuple[str, str], list[tuple[torch.Tensor, int]]] = {}
+    for index, (path, target) in enumerate(dataset.items):
+        parts = path.stem.rsplit("-", 1)
+        group_name = parts[0] if len(parts) == 2 and parts[1] in {"left", "core", "right"} else path.stem
+        image, _ = dataset[index]
+        grouped.setdefault((path.parent.name, group_name), []).append((image, target))
+
+    correct = 0
+    loss_sum = 0.0
+    criterion = nn.CrossEntropyLoss()
+    slot_results: list[tuple[str, int, torch.Tensor]] = []
+    with torch.no_grad():
+        for (_, group_name), variants in grouped.items():
+            images = torch.stack([image for image, _ in variants]).to(device)
+            target = torch.tensor([variants[0][1]], device=device)
+            mean_logits = model(images).mean(dim=0, keepdim=True)
+            loss_sum += criterion(mean_logits, target).item()
+            slot_results.append((group_name.split("-", 1)[0], target.item(), mean_logits[0]))
+
+    for team in {team for team, _, _ in slot_results}:
+        team_slots = [item for item in slot_results if item[0] == team]
+        edges: list[tuple[float, int, int]] = []
+        for slot_index, (_, _, logits) in enumerate(team_slots):
+            candidates = logits.argsort(descending=True).tolist()
+            candidates = [index for index in candidates if index != 0][:7]
+            edges.extend((logits[index].item(), slot_index, index) for index in candidates)
+        assigned_slots: set[int] = set()
+        assigned_classes: set[int] = set()
+        assignments: dict[int, int] = {}
+        for _, slot_index, class_index in sorted(edges, reverse=True):
+            if slot_index not in assigned_slots and class_index not in assigned_classes:
+                assignments[slot_index] = class_index
+                assigned_slots.add(slot_index)
+                assigned_classes.add(class_index)
+        correct += sum(
+            assignments.get(slot_index) == target
+            for slot_index, (_, target, _) in enumerate(team_slots)
+        )
+    groups = len(grouped)
+    return correct / max(1, groups), loss_sum / max(1, groups), groups
 
 
 def main() -> None:
@@ -663,7 +758,20 @@ def main() -> None:
     full_scoreboard_valid = FullScoreboardCropDataset(
         portraits, labels, args.full_scoreboard_validation_scenes_per_layout, args.seed, train=False
     )
-    real = RealCropDataset(labels)
+    real = RealCropDataset(labels, "train", repeats=args.real_samples_per_image)
+    real_valid = RealCropDataset(labels, "validation")
+    real_manifest = json.loads(REAL_MANIFEST.read_text()) if REAL_MANIFEST.exists() else None
+    if real_manifest is not None:
+        expected = real_manifest.get("expected_images", {})
+        if len(real.items) != expected.get("train"):
+            raise RuntimeError(
+                f"Real training manifest expects {expected.get('train')} images; found {len(real.items)}"
+            )
+        if len(real_valid.items) != expected.get("validation"):
+            raise RuntimeError(
+                f"Real validation manifest expects {expected.get('validation')} images; "
+                f"found {len(real_valid.items)}"
+            )
     train_parts: list[Dataset] = [train, scoreboard_train, full_scoreboard_train]
     if len(real):
         train_parts.append(real)
@@ -675,6 +783,9 @@ def main() -> None:
     full_scoreboard_valid_loader = DataLoader(
         full_scoreboard_valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True
     )
+    real_valid_loader = DataLoader(
+        real_valid, batch_size=args.batch_size, shuffle=False, num_workers=0
+    ) if len(real_valid) else None
     benchmark_5v5_scenes = max(1, args.benchmark_scoreboards // 2)
     benchmark_6v6_scenes = max(1, args.benchmark_scoreboards - benchmark_5v5_scenes)
     scoreboard_benchmark_5v5 = ScoreboardBenchmarkDataset(
@@ -699,6 +810,7 @@ def main() -> None:
     best_accuracy = 0.0
     best_scoreboard_crop_accuracy = 0.0
     best_full_scoreboard_validation_accuracy = 0.0
+    best_real_scoreboard_validation_accuracy = 0.0
     best_selection_score = 0.0
     best_state = None
     started = time.time()
@@ -726,18 +838,30 @@ def main() -> None:
         accuracy, validation_loss = evaluate(model, valid_loader, device)
         crop_accuracy, crop_validation_loss = evaluate(model, scoreboard_valid_loader, device)
         full_crop_accuracy, full_crop_validation_loss = evaluate(model, full_scoreboard_valid_loader, device)
-        selection_score = 0.25 * accuracy + 0.25 * crop_accuracy + 0.50 * full_crop_accuracy
+        if real_valid_loader is not None:
+            real_accuracy, real_validation_loss, _ = evaluate_real_groups(model, real_valid, device)
+            selection_score = (
+                0.20 * accuracy + 0.20 * crop_accuracy +
+                0.30 * full_crop_accuracy + 0.30 * real_accuracy
+            )
+        else:
+            real_accuracy, real_validation_loss = 0.0, 0.0
+            selection_score = 0.25 * accuracy + 0.25 * crop_accuracy + 0.50 * full_crop_accuracy
         print(
             f"epoch {epoch + 1}/{args.epochs} train_loss={running/max(1,seen):.4f} "
             f"val_loss={validation_loss:.4f} val_acc={accuracy:.4f} "
             f"score_crop_loss={crop_validation_loss:.4f} score_crop_acc={crop_accuracy:.4f} "
             f"full_crop_loss={full_crop_validation_loss:.4f} full_crop_acc={full_crop_accuracy:.4f} "
+            f"real_tv_loss={real_validation_loss:.4f} real_tv_acc={real_accuracy:.4f} "
             f"selection={selection_score:.4f}"
         )
         best_accuracy = max(best_accuracy, accuracy)
         best_scoreboard_crop_accuracy = max(best_scoreboard_crop_accuracy, crop_accuracy)
         best_full_scoreboard_validation_accuracy = max(
             best_full_scoreboard_validation_accuracy, full_crop_accuracy
+        )
+        best_real_scoreboard_validation_accuracy = max(
+            best_real_scoreboard_validation_accuracy, real_accuracy
         )
         if selection_score > best_selection_score:
             best_selection_score = selection_score
@@ -746,6 +870,11 @@ def main() -> None:
     if best_state is not None:
         model.load_state_dict(best_state)
     model = model.cpu().eval()
+    selected_real_scoreboard_validation_accuracy = 0.0
+    if real_valid_loader is not None:
+        selected_real_scoreboard_validation_accuracy, _, _ = evaluate_real_groups(
+            model, real_valid, torch.device("cpu")
+        )
     scoreboard_5v5_accuracy, scoreboard_5v5_loss = evaluate(model, scoreboard_loader_5v5, torch.device("cpu"))
     scoreboard_6v6_accuracy, scoreboard_6v6_loss = evaluate(model, scoreboard_loader_6v6, torch.device("cpu"))
     total_crops = len(scoreboard_benchmark_5v5) + len(scoreboard_benchmark_6v6)
@@ -787,12 +916,22 @@ def main() -> None:
         "scoreboard_crop_train_images": len(scoreboard_train),
         "full_scoreboard_crop_train_images": len(full_scoreboard_train),
         "real_train_images": len(real),
+        "real_dataset_id": real_manifest.get("dataset_id") if real_manifest else None,
+        "real_train_source_images": len(real.items),
+        "real_scoreboard_validation_images": len(real_valid),
+        "real_scoreboard_validation_groups": evaluate_real_groups(
+            model, real_valid, torch.device("cpu")
+        )[2] if len(real_valid) else 0,
         "validation_images": len(valid),
         "scoreboard_crop_validation_images": len(scoreboard_valid),
         "full_scoreboard_crop_validation_images": len(full_scoreboard_valid),
         "best_synthetic_validation_accuracy": round(best_accuracy, 6),
         "best_scoreboard_crop_validation_accuracy": round(best_scoreboard_crop_accuracy, 6),
         "best_full_scoreboard_validation_accuracy": round(best_full_scoreboard_validation_accuracy, 6),
+        "best_real_scoreboard_validation_accuracy": round(best_real_scoreboard_validation_accuracy, 6),
+        "selected_real_scoreboard_validation_accuracy": round(
+            selected_real_scoreboard_validation_accuracy, 6
+        ),
         "best_model_selection_score": round(best_selection_score, 6),
         "scoreboard_benchmark_scenes": args.benchmark_scoreboards,
         "scoreboard_benchmark_5v5_scenes": benchmark_5v5_scenes,
@@ -812,6 +951,10 @@ def main() -> None:
             raise SystemExit("Validation accuracy below 72%; refusing to publish model")
         if best_full_scoreboard_validation_accuracy < 0.65:
             raise SystemExit("Full-scoreboard crop validation below 65%; refusing to publish model")
+        if len(real_valid) and best_real_scoreboard_validation_accuracy < 0.65:
+            raise SystemExit("Real-TV scoreboard validation below 65%; refusing to publish model")
+        if len(real_valid) and selected_real_scoreboard_validation_accuracy < 0.65:
+            raise SystemExit("Selected model real-TV validation below 65%; refusing to publish model")
         if scoreboard_accuracy < 0.62:
             raise SystemExit("Combined full-scoreboard synthetic benchmark below 62%; refusing to publish model")
         if scoreboard_5v5_accuracy < 0.58:

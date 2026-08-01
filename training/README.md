@@ -15,11 +15,22 @@ holdout accuracy is below 72% or the full-scoreboard benchmark is below 62%.
 This is a reproducible synthetic baseline, not a claim that 600 or 1,040 independent
 real-world screenshots were scraped or collected.
 
-Real reviewed crops can be placed in:
+Real reviewed crops are split so a capture used for training cannot also satisfy
+the real-device publish gate:
 
 ```text
-training/real_samples/<hero-id>/*.jpg
+training/real_samples/train/<hero-id>/*.jpg
+training/real_samples/validation/<hero-id>/*.jpg
 ```
+
+The checked-in real-TV baseline was reviewed from two separate phone captures of
+the same current 6v6 scoreboard. It contains 36 training crop variants and 36
+held-out validation crops grouped into 12 slot decisions, all portrait cells only
+(no player names), and covers Sierra, D.Va, Mercy, Genji, Widowmaker, Wrecking Ball,
+Bastion, Junker Queen and Hanzo. Training repeats are augmented; validation images
+remain unmodified. This small regression set prevents publishing a model that
+passes generated scoreboards while failing the demonstrated TV-camera domain. It
+is not presented as a statistically representative real-world accuracy score.
 
 A legally licensed exported YOLO dataset can be converted with:
 

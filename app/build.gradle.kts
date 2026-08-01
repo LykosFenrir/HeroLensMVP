@@ -1,7 +1,17 @@
+import org.gradle.api.tasks.compile.JavaCompile
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
     id("org.jetbrains.kotlin.plugin.compose")
+}
+
+// The app has no Java sources. This opt-in exists for sandboxed Windows builds
+// where javac can be denied while closing dependency ZIP files. CI remains unchanged.
+if (providers.environmentVariable("HEROLENS_SKIP_EMPTY_JAVA_COMPILE").orNull == "true") {
+    tasks.withType<JavaCompile>().configureEach {
+        enabled = false
+    }
 }
 
 android {

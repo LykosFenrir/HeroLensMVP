@@ -49,6 +49,7 @@ jobs:
             --scoreboard-samples-per-class "${{ inputs.scoreboard_samples_per_class }}" \
             --full-scoreboard-train-scenes-per-layout "120" \
             --full-scoreboard-validation-scenes-per-layout "24" \
+            --real-samples-per-image "54" \
             --epochs "${{ inputs.epochs }}" \
             --benchmark-scoreboards "${{ inputs.benchmark_scoreboards }}" \
             --enforce-gates
@@ -67,6 +68,11 @@ jobs:
           assert metrics["best_synthetic_validation_accuracy"] >= 0.72
           assert metrics["best_scoreboard_crop_validation_accuracy"] >= 0.72
           assert metrics["best_full_scoreboard_validation_accuracy"] >= 0.65
+          assert metrics["real_train_source_images"] >= 36
+          assert metrics["real_scoreboard_validation_images"] >= 36
+          assert metrics["real_scoreboard_validation_groups"] >= 12
+          assert metrics["best_real_scoreboard_validation_accuracy"] >= 0.65
+          assert metrics["selected_real_scoreboard_validation_accuracy"] >= 0.65
           assert metrics["scoreboard_benchmark_scenes"] >= 500
           assert metrics["scoreboard_benchmark_accuracy"] >= 0.62
           assert metrics["scoreboard_benchmark_5v5_accuracy"] >= 0.58

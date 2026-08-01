@@ -1,0 +1,18 @@
+{
+  "dataset_id": "bahrain-tv-20260801-v1",
+  "source": "User-provided HeroLens Android screen recording",
+  "privacy": "Portrait cells only; player names and full frames are excluded",
+  "roster_verified_against": "https://overwatch.blizzard.com/en-us/heroes/",
+  "captures": {
+    "train": "First reviewed 6v6 picture scan, with three crop geometries per slot",
+    "validation": "Independent second 6v6 picture scan, three untouched crop variants per slot"
+  },
+  "lineup": {
+    "allies": ["sierra", "dva", "mercy", "bastion", "genji", "widowmaker"],
+    "enemies": ["wrecking-ball", "widowmaker", "dva", "bastion", "junker-queen", "hanzo"]
+  },
+  "expected_images": {
+    "train": 36,
+    "validation": 36
+  }
+}

@@ -180,7 +180,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             frame,
             profiles,
             templates,
-            limit = if (aiClassifier.isAvailable) 2 else 4
+            limit = 4
         )
         return rankedProfiles.mapIndexed { profileIndex, ranked ->
             detectProfile(
@@ -238,7 +238,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val flatCrops = cropGroups.flatten()
             val predictions = aiClassifier.classifyBatch(flatCrops, topK = 7)
             var predictionOffset = 0
-            slots.mapIndexed { index, (team, rect) ->
+            val independent = slots.mapIndexed { index, (team, rect) ->
                 onProgress(index + 1)
                 val cropCount = cropGroups[index].size
                 val slotPredictions = predictions
@@ -259,25 +259,23 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
                     val consensus = top * 0.62f + secondVote * 0.25f + thirdVote * 0.08f + mean * 0.05f
                     AggregatedCandidate(heroId, consensus, top, values.count { it >= 0.20f })
                 }.sortedByDescending(AggregatedCandidate::score)
-                val used = usedByTeam.getOrPut(team) { mutableSetOf() }
-                val available = ranked.filterNot { it.heroId in used }.ifEmpty { ranked }
-                val best = available.firstOrNull()
-                val second = available.getOrNull(1)?.score ?: 0f
+                val best = ranked.firstOrNull()
+                val second = ranked.getOrNull(1)?.score ?: 0f
                 val bestScore = best?.score ?: 0f
                 val margin = (bestScore - second).coerceAtLeast(0f)
                 val confidence = (bestScore * 0.82f + (margin / 0.24f).coerceIn(0f, 1f) * 0.18f).coerceIn(0f, 0.99f)
                 val hasCropConsensus = best != null && (best.votes >= 2 || best.peak >= 0.72f)
                 val accepted = best != null && hasCropConsensus && bestScore >= 0.37f && margin >= 0.030f
-                if (accepted) used += best!!.heroId
                 HeroDetection(
                     heroId = best?.heroId?.takeIf { accepted },
                     team = team,
                     slot = index % teamSize,
                     confidence = confidence,
-                    alternatives = available.take(3).map { candidate -> HeroCandidate(candidate.heroId, candidate.score) },
+                    alternatives = ranked.take(7).map { candidate -> HeroCandidate(candidate.heroId, candidate.score) },
                     bounds = rect
                 )
             }
+            assignUniqueNeuralHeroes(independent)
         } else {
             slots.mapIndexed { index, (team, rect) ->
                 onProgress(index + 1)
@@ -367,6 +365,55 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         val votes: Int
     )
 
+    /**
+     * Resolve a team together instead of letting early weak slots greedily consume
+     * a hero needed by a later strong slot. Score-sorted assignment gives the most
+     * certain slot first choice, then uses each losing slot's next-best candidate.
+     */
+    private fun assignUniqueNeuralHeroes(detections: List<HeroDetection>): List<HeroDetection> {
+        val output = detections.toMutableList()
+        TeamSide.entries.forEach { team ->
+            val teamIndices = detections.indices.filter { index ->
+                detections[index].team == team && detections[index].heroId != null
+            }
+            val edges = teamIndices.flatMap { index ->
+                detections[index].alternatives.map { candidate ->
+                    NeuralAssignmentEdge(index, candidate)
+                }
+            }.sortedByDescending { edge -> edge.candidate.confidence }
+            val assignedSlots = mutableSetOf<Int>()
+            val assignedHeroes = mutableSetOf<String>()
+            edges.forEach { edge ->
+                if (edge.slotIndex !in assignedSlots &&
+                    edge.candidate.heroId !in assignedHeroes &&
+                    edge.candidate.confidence >= 0.18f
+                ) {
+                    val original = detections[edge.slotIndex]
+                    val confidence = if (original.heroId == edge.candidate.heroId) {
+                        original.confidence
+                    } else {
+                        (edge.candidate.confidence * 0.90f).coerceIn(0f, original.confidence)
+                    }
+                    output[edge.slotIndex] = original.copy(
+                        heroId = edge.candidate.heroId,
+                        confidence = confidence
+                    )
+                    assignedSlots += edge.slotIndex
+                    assignedHeroes += edge.candidate.heroId
+                }
+            }
+            teamIndices.filterNot { it in assignedSlots }.forEach { index ->
+                output[index] = output[index].copy(heroId = null, confidence = 0f)
+            }
+        }
+        return output
+    }
+
+    private data class NeuralAssignmentEdge(
+        val slotIndex: Int,
+        val candidate: HeroCandidate
+    )
+
     private data class RankedProfile(
         val slots: List<Pair<TeamSide, NormalizedRect>>,
         val score: Float
@@ -385,7 +432,7 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
         limit: Int
     ): List<RankedProfile> {
         val representatives = templates.mapValues { (_, variants) -> variants.take(1) }
-        return profiles.asSequence().map { slots ->
+        val ranked = profiles.asSequence().map { slots ->
             val rowScores = slots.map { (_, rect) ->
                 val crop = SignatureMath.crop(frame, rect)
                 val signature = SignatureMath.signature(crop.rgba, crop.width, crop.height)
@@ -400,11 +447,28 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             val mean = if (rowScores.isEmpty()) 0f else rowScores.average().toFloat()
             val weakest = sorted.firstOrNull() ?: 0f
             RankedProfile(slots, (median * 0.56f + mean * 0.29f + weakest * 0.15f).coerceIn(0f, 1f))
+        }.toList()
+
+        /*
+         * With ONNX active, portrait templates are intentionally not loaded and
+         * templateScore is therefore zero. A global texture-only sort used to
+         * return several trim/width variants of the same X offset, commonly the
+         * bright role-icon or progression-badge column. Keep the strongest
+         * vertical/width candidate for every portrait-column offset so the real
+         * portrait column always reaches neural classification.
+         */
+        val candidates = if (templates.isEmpty()) {
+            ranked.groupBy { profile ->
+                (profile.slots.firstOrNull()?.second?.centerX.orZero() * 10_000f).toInt()
+            }.values.mapNotNull { group -> group.maxByOrNull(RankedProfile::score) }
+        } else {
+            ranked
         }
-            .sortedByDescending(RankedProfile::score)
+        return candidates.sortedByDescending(RankedProfile::score)
             .take(limit.coerceAtLeast(1))
-            .toList()
     }
+
+    private fun Float?.orZero(): Float = this ?: 0f
 
     private fun noTemplates(teamSize: Int, region: ScoreboardRegion?): DetectionResult = DetectionResult(
         detections = placeholderDetections(teamSize),
