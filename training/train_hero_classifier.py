@@ -48,6 +48,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--validation-per-class", type=int, default=5)
     parser.add_argument("--scoreboard-samples-per-class", type=int, default=36)
     parser.add_argument("--scoreboard-validation-per-class", type=int, default=6)
+    parser.add_argument("--full-scoreboard-train-scenes-per-layout", type=int, default=120)
+    parser.add_argument("--full-scoreboard-validation-scenes-per-layout", type=int, default=24)
     parser.add_argument("--unknown-samples", type=int, default=220)
     parser.add_argument("--epochs", type=int, default=7)
     parser.add_argument("--batch-size", type=int, default=64)
@@ -437,6 +439,71 @@ class ScoreboardBenchmarkDataset(Dataset):
         return self.transform(crop), self.by_label[hero_id]
 
 
+class FullScoreboardCropDataset(Dataset):
+    """Crops generated from complete 5v5/6v6 scoreboard scenes.
+
+    V8.3 trained mostly on isolated row crops, while its publish gate cropped from
+    a complete screen after global resize, blur and JPEG degradation.  That domain
+    gap produced strong row-crop validation but weak full-scoreboard accuracy.
+    This dataset uses the same full-scene path as the benchmark with disjoint seeds.
+    """
+
+    def __init__(
+        self,
+        portraits: dict[str, Image.Image],
+        labels: list[str],
+        scenes_per_layout: int,
+        seed: int,
+        train: bool,
+    ):
+        self.by_label = {label: index for index, label in enumerate(labels)}
+        self.items: list[tuple[Image.Image, int]] = []
+        hero_ids = labels[1:]
+        split_seed = seed + (40_000_000 if train else 50_000_000)
+        scene_count = max(1, scenes_per_layout)
+
+        for team_size in (5, 6):
+            for scene_index in range(scene_count):
+                scene_seed = split_seed + team_size * 1_000_000 + scene_index * 100_019
+                image, boxes = make_scoreboard_scene(
+                    portraits, hero_ids, scene_seed, team_size=team_size
+                )
+                for slot, ((left, top, right, bottom), hero_id) in enumerate(boxes):
+                    rng = random.Random(scene_seed + slot * 1_003 + 17)
+                    pad_x = max(1, int((right - left) * rng.uniform(0.02, 0.13)))
+                    pad_y = max(1, int((bottom - top) * rng.uniform(0.01, 0.10)))
+                    crop_left = max(0, min(image.width - 1, left - pad_x))
+                    crop_top = max(0, min(image.height - 1, top - pad_y))
+                    crop_right = max(crop_left + 1, min(image.width, right + pad_x))
+                    crop_bottom = max(crop_top + 1, min(image.height, bottom + pad_y))
+                    crop = image.crop((crop_left, crop_top, crop_right, crop_bottom))
+                    self.items.append((crop, self.by_label[hero_id]))
+
+        if train:
+            self.transform = transforms.Compose([
+                transforms.RandomPerspective(distortion_scale=0.08, p=0.30),
+                transforms.RandomAffine(
+                    degrees=1.8, translate=(0.025, 0.025), scale=(0.97, 1.03), shear=1.0
+                ),
+                transforms.Resize((INPUT_SIZE, INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN, STD),
+            ])
+        else:
+            self.transform = transforms.Compose([
+                transforms.Resize((INPUT_SIZE, INPUT_SIZE), antialias=True),
+                transforms.ToTensor(),
+                transforms.Normalize(MEAN, STD),
+            ])
+
+    def __len__(self) -> int:
+        return len(self.items)
+
+    def __getitem__(self, index: int):
+        image, target = self.items[index]
+        return self.transform(image), target
+
+
 class SyntheticHeroDataset(Dataset):
     def __init__(self, portraits: dict[str, Image.Image], labels: list[str], per_class: int, unknown_count: int, seed: int, train: bool):
         self.portraits = portraits
@@ -590,8 +657,14 @@ def main() -> None:
     scoreboard_valid = ScoreboardCropDataset(
         portraits, labels, args.scoreboard_validation_per_class, args.seed, train=False
     )
+    full_scoreboard_train = FullScoreboardCropDataset(
+        portraits, labels, args.full_scoreboard_train_scenes_per_layout, args.seed, train=True
+    )
+    full_scoreboard_valid = FullScoreboardCropDataset(
+        portraits, labels, args.full_scoreboard_validation_scenes_per_layout, args.seed, train=False
+    )
     real = RealCropDataset(labels)
-    train_parts: list[Dataset] = [train, scoreboard_train]
+    train_parts: list[Dataset] = [train, scoreboard_train, full_scoreboard_train]
     if len(real):
         train_parts.append(real)
     train_dataset: Dataset = ConcatDataset(train_parts)
@@ -599,6 +672,9 @@ def main() -> None:
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2, persistent_workers=True)
     valid_loader = DataLoader(valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True)
     scoreboard_valid_loader = DataLoader(scoreboard_valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True)
+    full_scoreboard_valid_loader = DataLoader(
+        full_scoreboard_valid, batch_size=args.batch_size, shuffle=False, num_workers=2, persistent_workers=True
+    )
     benchmark_5v5_scenes = max(1, args.benchmark_scoreboards // 2)
     benchmark_6v6_scenes = max(1, args.benchmark_scoreboards - benchmark_5v5_scenes)
     scoreboard_benchmark_5v5 = ScoreboardBenchmarkDataset(
@@ -622,6 +698,7 @@ def main() -> None:
     criterion = nn.CrossEntropyLoss(label_smoothing=0.04)
     best_accuracy = 0.0
     best_scoreboard_crop_accuracy = 0.0
+    best_full_scoreboard_validation_accuracy = 0.0
     best_selection_score = 0.0
     best_state = None
     started = time.time()
@@ -648,15 +725,20 @@ def main() -> None:
 
         accuracy, validation_loss = evaluate(model, valid_loader, device)
         crop_accuracy, crop_validation_loss = evaluate(model, scoreboard_valid_loader, device)
-        selection_score = 0.45 * accuracy + 0.55 * crop_accuracy
+        full_crop_accuracy, full_crop_validation_loss = evaluate(model, full_scoreboard_valid_loader, device)
+        selection_score = 0.25 * accuracy + 0.25 * crop_accuracy + 0.50 * full_crop_accuracy
         print(
             f"epoch {epoch + 1}/{args.epochs} train_loss={running/max(1,seen):.4f} "
             f"val_loss={validation_loss:.4f} val_acc={accuracy:.4f} "
             f"score_crop_loss={crop_validation_loss:.4f} score_crop_acc={crop_accuracy:.4f} "
+            f"full_crop_loss={full_crop_validation_loss:.4f} full_crop_acc={full_crop_accuracy:.4f} "
             f"selection={selection_score:.4f}"
         )
         best_accuracy = max(best_accuracy, accuracy)
         best_scoreboard_crop_accuracy = max(best_scoreboard_crop_accuracy, crop_accuracy)
+        best_full_scoreboard_validation_accuracy = max(
+            best_full_scoreboard_validation_accuracy, full_crop_accuracy
+        )
         if selection_score > best_selection_score:
             best_selection_score = selection_score
             best_state = {key: value.detach().cpu() for key, value in model.state_dict().items()}
@@ -703,11 +785,14 @@ def main() -> None:
         "hero_classes": len(labels) - 1,
         "synthetic_train_images": len(train),
         "scoreboard_crop_train_images": len(scoreboard_train),
+        "full_scoreboard_crop_train_images": len(full_scoreboard_train),
         "real_train_images": len(real),
         "validation_images": len(valid),
         "scoreboard_crop_validation_images": len(scoreboard_valid),
+        "full_scoreboard_crop_validation_images": len(full_scoreboard_valid),
         "best_synthetic_validation_accuracy": round(best_accuracy, 6),
         "best_scoreboard_crop_validation_accuracy": round(best_scoreboard_crop_accuracy, 6),
+        "best_full_scoreboard_validation_accuracy": round(best_full_scoreboard_validation_accuracy, 6),
         "best_model_selection_score": round(best_selection_score, 6),
         "scoreboard_benchmark_scenes": args.benchmark_scoreboards,
         "scoreboard_benchmark_5v5_scenes": benchmark_5v5_scenes,
@@ -725,6 +810,8 @@ def main() -> None:
     if args.enforce_gates:
         if best_accuracy < 0.72:
             raise SystemExit("Validation accuracy below 72%; refusing to publish model")
+        if best_full_scoreboard_validation_accuracy < 0.70:
+            raise SystemExit("Full-scoreboard crop validation below 70%; refusing to publish model")
         if scoreboard_accuracy < 0.62:
             raise SystemExit("Combined full-scoreboard synthetic benchmark below 62%; refusing to publish model")
         if scoreboard_5v5_accuracy < 0.58:
