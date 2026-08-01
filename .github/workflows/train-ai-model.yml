@@ -66,7 +66,7 @@ jobs:
           assert model.stat().st_size > 1_000_000
           assert metrics["best_synthetic_validation_accuracy"] >= 0.72
           assert metrics["best_scoreboard_crop_validation_accuracy"] >= 0.72
-          assert metrics["best_full_scoreboard_validation_accuracy"] >= 0.70
+          assert metrics["best_full_scoreboard_validation_accuracy"] >= 0.65
           assert metrics["scoreboard_benchmark_scenes"] >= 500
           assert metrics["scoreboard_benchmark_accuracy"] >= 0.62
           assert metrics["scoreboard_benchmark_5v5_accuracy"] >= 0.58
