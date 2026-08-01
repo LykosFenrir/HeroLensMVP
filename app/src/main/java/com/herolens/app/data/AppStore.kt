@@ -31,9 +31,9 @@ enum class DisplayType(val label: String) {
 }
 
 enum class TeamFormat(val label: String, val teamSize: Int?) {
-    AUTO("Auto", null),
-    FIVE_V_FIVE("5v5", 5),
-    SIX_V_SIX("6v6 / Open Queue", 6)
+    AUTO("Auto detect", null),
+    FIVE_V_FIVE("Force 5v5", 5),
+    SIX_V_SIX("Force 6v6", 6)
 }
 
 enum class ScanMode(
@@ -96,7 +96,8 @@ data class PlayerState(
     val mapProfile: MapProfile = MapProfile.MIXED,
     val currentHeroId: String? = null,
     val ultimateCharge: Int = 0,
-    val heroPool: Map<String, Int> = emptyMap()
+    val heroPool: Map<String, Int> = emptyMap(),
+    val allRoles: Boolean = false
 )
 
 data class ScanHistoryEntry(
@@ -135,7 +136,7 @@ class AppStore(context: Context) {
 
     fun saveSettings(settings: ScannerSettings) {
         preferences.edit()
-            .putInt(KEY_SETTINGS_SCHEMA, 8)
+            .putInt(KEY_SETTINGS_SCHEMA, 9)
             .putString(KEY_RANK, settings.rank.name)
             .putString(KEY_INPUT_PLATFORM, settings.inputPlatform.name)
             .putString(KEY_DISPLAY_TYPE, settings.displayType.name)
@@ -170,7 +171,8 @@ class AppStore(context: Context) {
             mapProfile = enumValue(KEY_MAP_PROFILE, MapProfile.MIXED),
             currentHeroId = preferences.getString(KEY_CURRENT_HERO, null)?.takeIf(String::isNotBlank),
             ultimateCharge = preferences.getInt(KEY_ULTIMATE, 0).coerceIn(0, 100),
-            heroPool = pool
+            heroPool = pool,
+            allRoles = preferences.getBoolean(KEY_ALL_ROLES, false)
         )
     }
 
@@ -185,6 +187,7 @@ class AppStore(context: Context) {
             .putString(KEY_CURRENT_HERO, state.currentHeroId.orEmpty())
             .putInt(KEY_ULTIMATE, state.ultimateCharge.coerceIn(0, 100))
             .putString(KEY_HERO_POOL, pool.toString())
+            .putBoolean(KEY_ALL_ROLES, state.allRoles)
             .apply()
     }
 
@@ -268,6 +271,7 @@ class AppStore(context: Context) {
         const val KEY_CURRENT_HERO = "current_hero"
         const val KEY_ULTIMATE = "ultimate"
         const val KEY_HERO_POOL = "hero_pool"
+        const val KEY_ALL_ROLES = "all_roles"
         const val KEY_HISTORY = "history"
         const val MAX_HISTORY = 50
     }

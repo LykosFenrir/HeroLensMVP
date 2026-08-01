@@ -1,13 +1,20 @@
-# HeroLens V8 AI Scanner
+# HeroLens V8.3 AI Scanner
 
 HeroLens is an unofficial Android-first Overwatch hero-pick coach. It combines scoreboard recognition with explainable recommendations based on enemy counters, ally synergy, map fit, rank, platform, personal hero comfort and switching cost.
 
-## V8.2 Open Queue support
+## V8.3 multi-layout and mixed-role support
 
-V8.2 adds structural 5v5/6v6 row detection, a manual **6v6 / Open Queue** override,
-console progression-badge crop handling, multi-crop neural consensus and a first-use
-Picture Scan permission fix. The training publish gate now evaluates both 5v5 and
-6v6 generated scoreboards. See `V8_2_OPEN_QUEUE_FIX.md`.
+V8.3 removes the assumption that a platform or named game mode determines the
+scoreboard format. Auto Scan and Picture Scan count visible rows and handle both
+5v5 and 6v6 layouts independently of PC or console. The manual override is now
+**Auto detect / Force 5v5 / Force 6v6**.
+
+Recommendations also add **All roles / mixed**. Use it when a mode allows flexible
+or mixed role compositions; use **Selected role** when your queue locks you to one
+role. The scanner never validates a lineup against a fixed Tank/Damage/Support
+composition, so unusual compositions remain scannable.
+
+See `V8_3_MULTI_MODE_LAYOUT_FIX.md`.
 
 ## Three scanner modes
 
@@ -53,9 +60,9 @@ Only use datasets and images whose licenses permit your intended use. Public Ove
 1. Open **Actions**.
 2. Select **Train Hero AI Model**.
 3. Select **Run workflow**.
-4. Keep the defaults: 20 variants per hero, 7 epochs and 600 benchmark scoreboards.
+4. Keep the defaults: 20 portrait variants per hero, 36 scoreboard crops per hero, 8 epochs and 600 benchmark scoreboards.
 5. The workflow trains, validates and commits `hero_classifier.onnx` to the repository.
-6. That commit automatically triggers **Build Android APK**.
+6. After training succeeds, manually run **Build Android APK** from Actions.
 7. Download the newest `HeroLens-debug-apk` artifact.
 
 If the model fails either validation gate, the workflow refuses to publish it.
@@ -84,7 +91,8 @@ app\build\outputs\apk\debug\app-debug.apk
 - Optional on-device neural classifier with dynamic batch inference
 - Signature-matcher fallback
 - TV/laptop scoreboard locator
-- 5v5 and 6v6 geometry handling
+- mode-independent 5v5 and 6v6 geometry handling
+- selected-role or all-role recommendation pools
 - Fast partial-lineup recommendations
 - Review/correct screens
 - Camera zoom, focus, torch, exposure and full-sensor rotation

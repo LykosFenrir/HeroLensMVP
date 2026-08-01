@@ -222,7 +222,7 @@ def render_scoreboard_icon(base: Image.Image, width: int, height: int, seed: int
         radius = max(3, int(min(width, height) * rng.uniform(0.22, 0.42)))
         cx, cy = rng.randint(0, max(0, width - 1)), rng.randint(0, max(0, height - 1))
         draw.ellipse((cx - radius, cy - radius, cx + radius, cy + radius), outline=(255, 255, 255, rng.randint(20, 90)), width=1)
-    # Console/Open Queue layouts can place a large progression badge over the
+    # Some console and event layouts can place a large progression badge over the
     # lower portrait. The Android scanner now also tries an upper-core crop, but
     # training on the obstruction prevents confident false hero matches.
     if rng.random() < 0.58:
@@ -716,7 +716,7 @@ def main() -> None:
         if scoreboard_5v5_accuracy < 0.58:
             raise SystemExit("5v5 scoreboard benchmark below 58%; refusing to publish model")
         if scoreboard_6v6_accuracy < 0.58:
-            raise SystemExit("6v6/Open Queue scoreboard benchmark below 58%; refusing to publish model")
+            raise SystemExit("6v6 scoreboard benchmark below 58%; refusing to publish model")
 
 
 if __name__ == "__main__":

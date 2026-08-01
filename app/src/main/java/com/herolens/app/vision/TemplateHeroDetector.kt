@@ -90,8 +90,8 @@ class TemplateHeroDetector(context: Context) : HeroDetector {
             ScoreboardLayout.PORTRAITS_RIGHT
         }
         val structuralMessage = when {
-            forcedTeamSize == 6 -> "6v6 / Open Queue mode selected."
-            forcedTeamSize == 5 -> "5v5 mode selected."
+            forcedTeamSize == 6 -> "Six-row scoreboard selected."
+            forcedTeamSize == 5 -> "Five-row scoreboard selected."
             structural.teamSize == 6 -> "Six scoreboard rows detected."
             structural.teamSize == 5 -> "Five scoreboard rows detected."
             else -> "Team size inferred from hero crops."

@@ -73,4 +73,22 @@ class RecommendationEngineTest {
         assertTrue(counter.detailAr.isNotBlank())
     }
 
+    @Test
+    fun mixedRolePoolCanRecommendAcrossAllRoles() {
+        val result = RecommendationEngine.recommend(
+            MatchContext(
+                role = Role.DAMAGE,
+                mapProfile = MapProfile.MIXED,
+                allyIds = setOf("mercy"),
+                enemyIds = setOf("pharah", "echo"),
+                preferences = emptyMap(),
+                allRoles = true
+            ),
+            limit = HeroCatalog.heroes.size
+        )
+
+        assertEquals(HeroCatalog.heroes.size, result.size)
+        assertEquals(Role.entries.toSet(), result.map { it.hero.role }.toSet())
+    }
+
 }

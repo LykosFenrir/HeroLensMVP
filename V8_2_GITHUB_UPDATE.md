@@ -1,21 +1,7 @@
-# Upload HeroLens V8.2 to GitHub
+# HeroLens V8.2 GitHub update — superseded by V8.3
 
-Upload the contents of the fix-only ZIP into the repository root and overwrite the
-matching files. Do not delete `app/src/main/assets/model/hero_classifier.onnx`.
+V8.2 introduced five-row/six-row detection after a recorded six-row console test.
+It did **not** mean that PS5 always uses six rows. V8.3 replaces the old labels with
+**Auto detect / Force 5v5 / Force 6v6** and adds mixed-role recommendations.
 
-After committing:
-
-1. Open **Settings > Scoreboard team size** in HeroLens and use **6v6 / Open Queue**
-   for the first PS5 retest. Auto mode remains available after validation.
-2. Run **Actions > Train Hero AI Model** with:
-   - Synthetic variants per hero: 20
-   - Scoreboard crops per hero: 36
-   - Epochs: 8
-   - Benchmark scoreboards: 600
-3. Confirm the log reports all three metrics:
-   - `scoreboard_benchmark_5v5_accuracy`
-   - `scoreboard_benchmark_6v6_accuracy`
-   - `scoreboard_benchmark_accuracy`
-4. After training succeeds and commits the new ONNX model, manually run
-   **Actions > Build Android APK**.
-5. Install the new APK and retest the same PS5 Open Queue scoreboard.
+Use `V8_3_GITHUB_UPDATE.md` for the current upload steps.

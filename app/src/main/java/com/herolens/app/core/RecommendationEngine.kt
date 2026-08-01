@@ -53,7 +53,9 @@ object RecommendationEngine {
         val allies = context.allyIds.mapNotNull(HeroCatalog.byId::get)
         val enemies = context.enemyIds.mapNotNull(HeroCatalog.byId::get)
 
-        return HeroCatalog.forRole(context.role)
+        val candidatePool = if (context.allRoles) HeroCatalog.heroes else HeroCatalog.forRole(context.role)
+
+        return candidatePool
             .map { candidate ->
                 val contributions = mutableListOf<Contribution>()
 

@@ -8,8 +8,8 @@ import kotlin.math.sqrt
 /**
  * Estimates whether a localized scoreboard contains five or six rows per team.
  *
- * Open Queue / legacy 6v6 scoreboards can otherwise look deceptively good when
- * divided into five tall crops, causing confident but vertically shifted heroes.
+ * Six-row scoreboards can otherwise look deceptively good when divided into
+ * five tall crops, causing confident but vertically shifted heroes.
  * This estimator looks for the repeated bright role/status glyph bands near both
  * panel edges and scores how well they form a regular five-row or six-row grid.
  */
@@ -50,8 +50,8 @@ object ScoreboardTeamSizeEstimator {
     }
 
     /**
-     * Console scoreboards often expose one bright status/role glyph per row near
-     * the table edge. Counting a regular sequence is a much stronger 6v6 signal
+     * Some scoreboard layouts expose one bright status/role glyph per row near
+     * the table edge. Counting a regular sequence is a much stronger six-row signal
      * than classifier confidence, especially when one ally row says WAITING FOR PLAYER.
      */
     private fun regularBandScore(

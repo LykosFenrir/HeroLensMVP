@@ -104,6 +104,7 @@ fun HeroLensApp() {
 
     val initialPlayerState = remember { store.loadPlayerState() }
     var roleName by rememberSaveable { mutableStateOf(initialPlayerState.role.name) }
+    var allRoles by rememberSaveable { mutableStateOf(initialPlayerState.allRoles) }
     var mapName by rememberSaveable { mutableStateOf(initialPlayerState.mapProfile.name) }
     var currentHeroId by rememberSaveable { mutableStateOf(initialPlayerState.currentHeroId) }
     var ultimateChargeText by rememberSaveable { mutableStateOf(initialPlayerState.ultimateCharge.toString()) }
@@ -153,14 +154,15 @@ fun HeroLensApp() {
     }
 
     LaunchedEffect(settings) { store.saveSettings(settings) }
-    LaunchedEffect(roleName, mapName, currentHeroId, ultimateChargeText, preferences.toMap()) {
+    LaunchedEffect(roleName, allRoles, mapName, currentHeroId, ultimateChargeText, preferences.toMap()) {
         store.savePlayerState(
             PlayerState(
                 role = Role.valueOf(roleName),
                 mapProfile = MapProfile.valueOf(mapName),
                 currentHeroId = currentHeroId,
                 ultimateCharge = ultimateChargeText.toIntOrNull()?.coerceIn(0, 100) ?: 0,
-                heroPool = preferences.toMap()
+                heroPool = preferences.toMap(),
+                allRoles = allRoles
             )
         )
     }
@@ -176,7 +178,8 @@ fun HeroLensApp() {
         currentHeroId = currentHeroId,
         ultimateCharge = ultimateChargeText.toIntOrNull()?.coerceIn(0, 100) ?: 0,
         rank = settings.rank.name,
-        inputPlatform = settings.inputPlatform.name
+        inputPlatform = settings.inputPlatform.name,
+        allRoles = allRoles
     )
     val recommendations = remember(matchContext) { RecommendationEngine.recommend(matchContext) }
 
@@ -184,7 +187,7 @@ fun HeroLensApp() {
         val best = recommendations.firstOrNull() ?: return
         val entry = ScanHistoryEntry(
             timestamp = System.currentTimeMillis(),
-            role = role.name,
+            role = if (allRoles) "ALL_ROLES" else role.name,
             currentHeroId = currentHeroId,
             bestHeroId = best.hero.id,
             fitScore = best.score,
@@ -305,6 +308,13 @@ fun HeroLensApp() {
                 when (selectedTab) {
                     MainTab.SCAN -> ScanHomeScreen(
                         role = role,
+                        allRoles = allRoles,
+                        onAllRolesChanged = { enabled ->
+                            allRoles = enabled
+                            if (!enabled && currentHeroId?.let { HeroCatalog.byId[it]?.role } != role) {
+                                currentHeroId = null
+                            }
+                        },
                         onRoleChanged = {
                             roleName = it.name
                             currentHeroId = null
@@ -338,7 +348,12 @@ fun HeroLensApp() {
                     MainTab.HISTORY -> HistoryScreen(
                         history = history,
                         onOpen = { entry ->
-                            roleName = entry.role
+                            if (entry.role == "ALL_ROLES") {
+                                allRoles = true
+                            } else {
+                                allRoles = false
+                                roleName = runCatching { Role.valueOf(entry.role).name }.getOrDefault(Role.DAMAGE.name)
+                            }
                             currentHeroId = entry.currentHeroId
                             scanConfidence = entry.scanConfidence
                             allyIds.clear()
@@ -386,6 +401,8 @@ fun HeroLensApp() {
 @Composable
 private fun ScanHomeScreen(
     role: Role,
+    allRoles: Boolean,
+    onAllRolesChanged: (Boolean) -> Unit,
     onRoleChanged: (Role) -> Unit,
     mapProfile: MapProfile,
     onMapChanged: (MapProfile) -> Unit,
@@ -404,6 +421,7 @@ private fun ScanHomeScreen(
     onOpenPicker: (PickerTarget) -> Unit,
     onAnalyze: () -> Unit
 ) {
+    val selectableHeroes = if (allRoles) HeroCatalog.heroes else HeroCatalog.forRole(role)
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(18.dp),
@@ -466,14 +484,41 @@ private fun ScanHomeScreen(
         }
 
         item {
-            SectionTitle(stringResource(R.string.role))
+            SectionTitle("Recommendation pool")
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(Role.entries) { item ->
+                item {
                     FilterChip(
-                        selected = role == item,
-                        onClick = { onRoleChanged(item) },
-                        label = { Text(item.displayName) }
+                        selected = !allRoles,
+                        onClick = { onAllRolesChanged(false) },
+                        label = { Text("Selected role") }
                     )
+                }
+                item {
+                    FilterChip(
+                        selected = allRoles,
+                        onClick = { onAllRolesChanged(true) },
+                        label = { Text("All roles / mixed") }
+                    )
+                }
+            }
+            Text(
+                if (allRoles) "Use this for modes where roles are flexible or mixed. HeroLens will compare heroes from every role."
+                else "Use this when your current mode locks you to one role.",
+                style = MaterialTheme.typography.bodySmall
+            )
+        }
+
+        if (!allRoles) {
+            item {
+                SectionTitle(stringResource(R.string.role))
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    items(Role.entries) { item ->
+                        FilterChip(
+                            selected = role == item,
+                            onClick = { onRoleChanged(item) },
+                            label = { Text(item.displayName) }
+                        )
+                    }
                 }
             }
         }
@@ -514,7 +559,7 @@ private fun ScanHomeScreen(
             Text(stringResource(R.string.cycle_hint), style = MaterialTheme.typography.bodySmall)
             Spacer(Modifier.height(8.dp))
             LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                items(HeroCatalog.forRole(role), key = Hero::id) { hero ->
+                items(selectableHeroes, key = Hero::id) { hero ->
                     val level = preferences[hero.id] ?: 0
                     AssistChip(
                         onClick = {
@@ -544,7 +589,7 @@ private fun ScanHomeScreen(
                         label = { Text(stringResource(R.string.not_selected)) }
                     )
                 }
-                items(HeroCatalog.forRole(role), key = Hero::id) { hero ->
+                items(selectableHeroes, key = Hero::id) { hero ->
                     FilterChip(
                         selected = currentHeroId == hero.id,
                         onClick = { onCurrentHeroChanged(hero.id) },
@@ -932,7 +977,7 @@ private fun HistoryScreen(
                         Column(Modifier.weight(1f)) {
                             Text(best?.name ?: entry.bestHeroId, fontWeight = FontWeight.Bold, style = MaterialTheme.typography.titleMedium)
                             Text(formatTimestamp(entry.timestamp), style = MaterialTheme.typography.bodySmall)
-                            Text("${entry.role.lowercase().replaceFirstChar(Char::uppercase)} · Scan ${entry.scanConfidence}%")
+                            Text("${if (entry.role == "ALL_ROLES") "All roles" else entry.role.lowercase().replaceFirstChar(Char::uppercase)} · Scan ${entry.scanConfidence}%")
                         }
                         Text("${entry.fitScore}%", fontWeight = FontWeight.Black, style = MaterialTheme.typography.titleLarge)
                     }
@@ -1031,7 +1076,7 @@ private fun SettingsScreen(settings: ScannerSettings, onSettingsChanged: (Scanne
         item {
             SettingsCard(
                 title = "Scoreboard team size",
-                description = "Auto detects normal 5v5 and 6v6 Open Queue. Select 6v6 when console row detection is uncertain or a waiting-for-player row is present."
+                description = "Auto detects five-row and six-row scoreboards from the visible row structure. Force a size only when automatic row counting is uncertain. Platform and game mode do not determine team size."
             ) {
                 LazyRow(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     items(TeamFormat.entries) { format ->
