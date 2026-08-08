@@ -1,0 +1,22 @@
+# Android / Gradle outputs
+.gradle/
+.gradle-*/
+**/build/
+local.properties
+*.iml
+.idea/
+
+# Local SDK, test and training environments
+.android-user/
+.tools/
+.torch/
+.venv/
+training/cache/
+**/__pycache__/
+training/stadium_draft/local/
+training/stadium_draft/downloads/
+training/stadium_draft/manifest.json
+
+# Local logs and deliverables
+*.log
+outputs/

@@ -25,7 +25,7 @@ class LiveScanStabilizer(
         val chosenTeamSize = frames
             .groupBy { it.teamSize }
             .maxByOrNull { (_, values) -> values.sumOf { it.quality.toDouble() } }
-            ?.key?.coerceIn(5, 6) ?: result.teamSize.coerceIn(5, 6)
+            ?.key?.coerceIn(3, 6) ?: result.teamSize.coerceIn(3, 6)
         val eligibleFrames = frames.filter { it.teamSize == chosenTeamSize }.ifEmpty { listOf(result) }
         val chosenLayout = eligibleFrames
             .groupBy { it.layout }

@@ -323,7 +323,15 @@ def make_scoreboard_scene(
     hero_ids: list[str],
     seed: int,
     team_size: int = 5,
-) -> tuple[Image.Image, list[tuple[tuple[int, int, int, int], str]]]:
+    include_region: bool = False,
+) -> (
+    tuple[Image.Image, list[tuple[tuple[int, int, int, int], str]]]
+    | tuple[
+        Image.Image,
+        list[tuple[tuple[int, int, int, int], str]],
+        tuple[int, int, int, int],
+    ]
+):
     """Build one full 16:9 scoreboard scene and return its known portrait boxes.
 
     This is not claimed as real gameplay data. It is a repeatable stress benchmark
@@ -416,6 +424,8 @@ def make_scoreboard_scene(
     small = background.resize((max(320, int(width * downscale)), max(180, int(height * downscale))), Image.Resampling.BILINEAR)
     background = small.resize((width, height), Image.Resampling.BILINEAR)
     background = add_screen_artifacts(background, rng)
+    if include_region:
+        return background, boxes, (left, blue_top, left + panel_width, red_top + panel_height)
     return background, boxes
 
 
@@ -949,6 +959,8 @@ def main() -> None:
     if args.enforce_gates:
         if best_accuracy < 0.72:
             raise SystemExit("Validation accuracy below 72%; refusing to publish model")
+        if best_scoreboard_crop_accuracy < 0.72:
+            raise SystemExit("Scoreboard-crop validation below 72%; refusing to publish model")
         if best_full_scoreboard_validation_accuracy < 0.65:
             raise SystemExit("Full-scoreboard crop validation below 65%; refusing to publish model")
         if len(real_valid) and best_real_scoreboard_validation_accuracy < 0.65:

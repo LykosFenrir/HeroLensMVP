@@ -22,8 +22,8 @@ android {
         applicationId = "com.herolens.app"
         minSdk = 26
         targetSdk = 36
-        versionCode = 16
-        versionName = "0.8.0"
+        versionCode = 20
+        versionName = "0.12.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
@@ -36,6 +36,17 @@ android {
 
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
+    }
+
+    // Direct-download APKs stay practical in size by shipping one native runtime
+    // per CPU architecture. The universal APK remains available as a fallback.
+    splits {
+        abi {
+            isEnable = true
+            reset()
+            include("arm64-v8a", "armeabi-v7a", "x86", "x86_64")
+            isUniversalApk = true
+        }
     }
 
     buildTypes {
@@ -78,9 +89,18 @@ dependencies {
     implementation("androidx.camera:camera-view:$cameraXVersion")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
     implementation("com.microsoft.onnxruntime:onnxruntime-android:1.27.0")
+    // Bundled, offline-first OCR: match screenshots work immediately and never upload.
+    implementation("com.google.mlkit:text-recognition:16.0.1")
 
     debugImplementation("androidx.compose.ui:ui-tooling")
     debugImplementation("androidx.compose.ui:ui-test-manifest")
 
-    testImplementation("junit:junit:4.13.2")
+    if (providers.environmentVariable("HEROLENS_USE_GRADLE_JUNIT").orNull == "true") {
+        testImplementation(files(
+            File(gradle.gradleHomeDir, "lib/junit-4.13.2.jar"),
+            File(gradle.gradleHomeDir, "lib/hamcrest-core-1.3.jar")
+        ))
+    } else {
+        testImplementation("junit:junit:4.13.2")
+    }
 }

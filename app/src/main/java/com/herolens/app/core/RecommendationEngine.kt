@@ -49,11 +49,92 @@ object RecommendationEngine {
         "zenyatta" to mapOf("sigma" to 1.6, "widowmaker" to 1.5, "hanzo" to 1.5)
     )
 
+    fun guideFor(heroId: String, relationshipLimit: Int = 8): HeroGuide? {
+        val hero = HeroCatalog.byId[heroId] ?: return null
+        val limit = relationshipLimit.coerceIn(0, 8)
+        val otherHeroes = HeroCatalog.heroes.filterNot { it.id == hero.id }
+        val matchupScores = otherHeroes.associateWith { other ->
+            guideCounterScore(hero, other) to guideCounterScore(other, hero)
+        }
+
+        val counters = matchupScores.entries
+            .map { (other, scores) -> other to scores }
+            .filter { (_, scores) -> scores.first >= 0.75 && scores.first >= scores.second + 0.20 }
+            .map { (other, scores) -> other to scores.first }
+            .sortedWith(compareByDescending<Pair<Hero, Double>> { it.second }.thenBy { it.first.name })
+            .take(limit)
+            .map { (target, _) ->
+                HeroRelationship(
+                    hero = target,
+                    explanation = counterExplanation(hero, target),
+                    howToPlay = counterPlayInstruction(hero, target),
+                    evidence = if (directCounters[hero.id]?.containsKey(target.id) == true) {
+                        GuideEvidence.CURATED
+                    } else {
+                        GuideEvidence.INFERRED
+                    }
+                )
+            }
+
+        val threats = matchupScores.entries
+            .map { (other, scores) -> other to scores }
+            .filter { (_, scores) -> scores.second >= 0.75 && scores.second >= scores.first + 0.20 }
+            .map { (other, scores) -> other to scores.second }
+            .sortedWith(compareByDescending<Pair<Hero, Double>> { it.second }.thenBy { it.first.name })
+            .take(limit)
+            .map { (threat, _) ->
+                HeroRelationship(
+                    hero = threat,
+                    explanation = counterExplanation(threat, hero),
+                    howToPlay = threatResponse(hero, threat),
+                    evidence = if (directCounters[threat.id]?.containsKey(hero.id) == true) {
+                        GuideEvidence.CURATED
+                    } else {
+                        GuideEvidence.INFERRED
+                    }
+                )
+            }
+
+        val synergies = otherHeroes
+            .map { it to guideSynergyScore(hero, it) }
+            .filter { (_, score) -> score >= 0.55 }
+            .sortedWith(compareByDescending<Pair<Hero, Double>> { it.second }.thenBy { it.first.name })
+            .take(limit)
+            .map { (ally, _) ->
+                HeroRelationship(
+                    hero = ally,
+                    explanation = synergyExplanation(hero, ally),
+                    howToPlay = synergyPlayInstruction(hero, ally),
+                    evidence = if (
+                        directSynergies[hero.id]?.containsKey(ally.id) == true ||
+                        directSynergies[ally.id]?.containsKey(hero.id) == true
+                    ) {
+                        GuideEvidence.CURATED
+                    } else {
+                        GuideEvidence.INFERRED
+                    }
+                )
+            }
+
+        return HeroGuide(
+            hero = hero,
+            archetype = archetype(hero),
+            overview = overview(hero),
+            strengths = hero.traits.map(::traitLabel).sorted().take(6),
+            gamePlan = generalGamePlan(hero),
+            counters = counters,
+            threats = threats,
+            synergies = synergies
+        )
+    }
+
     fun recommend(context: MatchContext, limit: Int = 3): List<Recommendation> {
         val allies = context.allyIds.mapNotNull(HeroCatalog.byId::get)
         val enemies = context.enemyIds.mapNotNull(HeroCatalog.byId::get)
 
-        val candidatePool = if (context.allRoles) HeroCatalog.heroes else HeroCatalog.forRole(context.role)
+        val candidatePool = (if (context.allRoles) HeroCatalog.heroes else HeroCatalog.forRole(context.role))
+            .filterNot { it.id in context.unavailableHeroIds || it.id in context.allyIds }
+            .filter { context.availableHeroIds == null || it.id in context.availableHeroIds }
 
         return candidatePool
             .map { candidate ->
@@ -80,9 +161,10 @@ object RecommendationEngine {
                 }
 
                 allies.forEach { ally ->
-                    val direct = directSynergies[candidate.id]?.get(ally.id)
-                        ?: directSynergies[ally.id]?.get(candidate.id)
-                        ?: 0.0
+                    val direct = maxOf(
+                        directSynergies[candidate.id]?.get(ally.id) ?: 0.0,
+                        directSynergies[ally.id]?.get(candidate.id) ?: 0.0
+                    )
                     val synergy = (direct + genericSynergy(candidate, ally)) * 1.8
                     if (synergy > 2.0) {
                         contributions += Contribution(
@@ -196,6 +278,158 @@ object RecommendationEngine {
         return score
     }
 
+    private fun guideCounterScore(candidate: Hero, enemy: Hero): Double {
+        var score = (directCounters[candidate.id]?.get(enemy.id) ?: 0.0) + genericCounter(candidate, enemy)
+        if (Trait.DIVE in candidate.traits && Trait.LONG_RANGE in enemy.traits) score += 0.9
+        if (Trait.BURST in candidate.traits && Trait.SUSTAIN in enemy.traits) score += 0.35
+        if (Trait.DISPLACEMENT in candidate.traits && Trait.CLOSE_RANGE in enemy.traits) score += 0.3
+        if (Trait.LONG_RANGE in candidate.traits && Trait.CLOSE_RANGE in enemy.traits) score += 0.25
+        if (Trait.CLEANSE in candidate.traits && Trait.AREA_CONTROL in enemy.traits) score += 0.3
+        val reverse = (directCounters[enemy.id]?.get(candidate.id) ?: 0.0) + genericCounter(enemy, candidate)
+        return score - reverse * 0.55
+    }
+
+    private fun guideSynergyScore(candidate: Hero, ally: Hero): Double {
+        var score = maxOf(
+            directSynergies[candidate.id]?.get(ally.id) ?: 0.0,
+            directSynergies[ally.id]?.get(candidate.id) ?: 0.0
+        )
+        score += maxOf(genericSynergy(candidate, ally), genericSynergy(ally, candidate))
+        if (candidate.role != ally.role) score += 0.15
+        if (Trait.CLEANSE in candidate.traits && (Trait.DIVE in ally.traits || Trait.BRAWL in ally.traits)) score += 0.45
+        if (Trait.CLEANSE in ally.traits && (Trait.DIVE in candidate.traits || Trait.BRAWL in candidate.traits)) score += 0.45
+        if (Trait.SUSTAIN in candidate.traits && (Trait.BRAWL in ally.traits || Trait.DIVE in ally.traits)) score += 0.35
+        if (Trait.SUSTAIN in ally.traits && (Trait.BRAWL in candidate.traits || Trait.DIVE in candidate.traits)) score += 0.35
+        if (Trait.SPEED in candidate.traits && Trait.CLOSE_RANGE in ally.traits) score += 0.35
+        if (Trait.SPEED in ally.traits && Trait.CLOSE_RANGE in candidate.traits) score += 0.35
+        return score
+    }
+
+    private fun archetype(hero: Hero): String = when {
+        Trait.DIVE in hero.traits && hero.role == Role.TANK -> "Dive initiator"
+        Trait.BRAWL in hero.traits && hero.role == Role.TANK -> "Front-line brawler"
+        Trait.POKE in hero.traits && hero.role == Role.TANK -> "Space-control anchor"
+        Trait.SPEED in hero.traits && hero.role == Role.SUPPORT -> "Tempo support"
+        Trait.SNIPER in hero.traits -> "Precision pick maker"
+        Trait.DIVE in hero.traits -> "Mobile assassin"
+        Trait.BRAWL in hero.traits || Trait.CLOSE_RANGE in hero.traits -> "Close-range fighter"
+        Trait.POKE in hero.traits || Trait.LONG_RANGE in hero.traits -> "Ranged pressure"
+        Trait.PEEL in hero.traits || Trait.PROTECTION in hero.traits -> "Defensive enabler"
+        Trait.SPEED in hero.traits -> "Tempo enabler"
+        Trait.SUSTAIN in hero.traits -> "Sustain support"
+        else -> "Flexible specialist"
+    }
+
+    private fun overview(hero: Hero): String {
+        val rolePlan = when (hero.role) {
+            Role.TANK -> "Create safe space for your team and decide when the fight moves forward or resets."
+            Role.DAMAGE -> "Convert pressure into eliminations while keeping an escape route and a useful angle."
+            Role.SUPPORT -> "Enable your team's win condition while staying alive and preserving one answer to enemy pressure."
+        }
+        val rangePlan = when {
+            Trait.DIVE in hero.traits -> "Stage from cover, engage an isolated target with your team, then leave before the counter-push."
+            Trait.BRAWL in hero.traits || Trait.CLOSE_RANGE in hero.traits -> "Use corners to reach effective range without spending every cooldown on entry."
+            Trait.POKE in hero.traits || Trait.LONG_RANGE in hero.traits || Trait.SNIPER in hero.traits -> "Build an angle that overlaps your team's pressure and rotate before enemies close the gap."
+            else -> "Play at the edge of your effective range and move with the team's strongest pressure window."
+        }
+        return "$rolePlan $rangePlan"
+    }
+
+    private fun generalGamePlan(hero: Hero): List<String> = buildList {
+        add(
+            when {
+                Trait.LONG_RANGE in hero.traits || Trait.POKE in hero.traits || Trait.SNIPER in hero.traits ->
+                    "Setup: take a safe off-angle with cover and a retreat path; avoid standing directly behind the whole team."
+                Trait.CLOSE_RANGE in hero.traits || Trait.BRAWL in hero.traits ->
+                    "Setup: stage at a corner or short flank so you enter at full resources instead of crossing open ground."
+                else -> "Setup: stay within help range of the team while watching the lane your kit controls best."
+            }
+        )
+        add(
+            when {
+                Trait.DIVE in hero.traits ->
+                    "Engage: call one reachable target, enter after a key enemy cooldown is used, and focus the same target as your dive partner."
+                Trait.BRAWL in hero.traits || Trait.RUSH in hero.traits ->
+                    "Engage: close distance together, claim the next piece of cover, and avoid chasing beyond your support line."
+                Trait.POKE in hero.traits || Trait.SNIPER in hero.traits ->
+                    "Engage: pressure from two angles, force defensive cooldowns, then advance only when the enemy gives up space."
+                else -> "Engage: commit when your team can see the same target and has enough resources to finish the fight."
+            }
+        )
+        add(
+            when {
+                Trait.MOBILITY in hero.traits ->
+                    "Cooldown rule: spend one movement tool to create pressure and keep the next one for cover or disengagement."
+                Trait.PROTECTION in hero.traits || Trait.PEEL in hero.traits || Trait.CLEANSE in hero.traits ->
+                    "Cooldown rule: hold one defensive answer for the enemy's strongest engage instead of using every resource for routine damage."
+                Trait.BURST in hero.traits ->
+                    "Cooldown rule: combine burst tools inside one short elimination window rather than spreading them across several targets."
+                else -> "Cooldown rule: cycle resources around cover so the enemy never gets a clean punish window."
+            }
+        )
+        add(
+            when (hero.role) {
+                Role.TANK -> "Reset: back out before armor, mobility and support attention are all gone; your survival keeps the next fight playable."
+                Role.DAMAGE -> "Reset: change angle after revealing your position and regroup quickly when the first elimination goes against you."
+                Role.SUPPORT -> "Reset: prioritize your life, break enemy sightlines, and move early when the front line can no longer hold space."
+            }
+        )
+    }.distinct()
+
+    private fun traitLabel(trait: Trait): String = trait.name
+        .lowercase()
+        .replace('_', ' ')
+        .replaceFirstChar(Char::uppercase)
+
+    private fun counterPlayInstruction(candidate: Hero, enemy: Hero): String {
+        specialCounterPlayInstructions["${candidate.id}|${enemy.id}"]?.let { return it }
+        return when {
+        Trait.DIVE in candidate.traits && (Trait.SNIPER in enemy.traits || Trait.LONG_RANGE in enemy.traits) ->
+            "Approach through cover, force the escape first, then follow only while your exit remains available."
+        (Trait.ANTI_AIR in candidate.traits || Trait.HITSCAN in candidate.traits) && Trait.VERTICALITY in enemy.traits ->
+            "Hold a clean sightline and apply pressure during exposed flight; do not chase through roofs or hard cover."
+        (Trait.ANTI_DIVE in candidate.traits || Trait.PEEL in candidate.traits) && Trait.DIVE in enemy.traits ->
+            "Stay near the likely dive target, save one control tool, and punish the enemy's exit after the engage stalls."
+        Trait.SHIELD_BREAK in candidate.traits && Trait.PROTECTION in enemy.traits ->
+            "Keep sustained pressure on the defensive resource, then call the short window when it breaks or retracts."
+        Trait.AREA_CONTROL in candidate.traits && Trait.MOBILITY in enemy.traits ->
+            "Control the exit route rather than aiming only at the entry point; force movement into predictable lanes."
+        else -> "Keep the fight at your preferred range, track the enemy's escape tool, and focus pressure during their weakest cooldown window."
+        }
+    }
+
+    private fun threatResponse(hero: Hero, threat: Hero): String = when {
+        Trait.DIVE in threat.traits && (Trait.SNIPER in hero.traits || Trait.LONG_RANGE in hero.traits) ->
+            "Play within peel range, rotate before the dive lands, and save mobility or control for the second half of the engage."
+        (Trait.ANTI_AIR in threat.traits || Trait.HITSCAN in threat.traits) && Trait.VERTICALITY in hero.traits ->
+            "Use short flight windows and hard cover; change elevation only after the hitscan is pressured or looking elsewhere."
+        (Trait.ANTI_DIVE in threat.traits || Trait.PEEL in threat.traits) && Trait.DIVE in hero.traits ->
+            "Bait the defensive cooldown with a soft engage, disengage, then re-enter before it returns."
+        Trait.AREA_CONTROL in threat.traits && Trait.MOBILITY in hero.traits ->
+            "Do not spend every movement tool on entry; identify a clear exit lane before committing."
+        Trait.BURST in threat.traits && Trait.SUSTAIN in hero.traits ->
+            "Respect the burst window, use cover before healing, and avoid giving the threat an uninterrupted close-range trade."
+        else -> "Track this hero before each fight, avoid the range where their kit is strongest, and keep one resource for disengagement."
+    }
+
+    private fun synergyPlayInstruction(candidate: Hero, ally: Hero): String = when {
+        Trait.DIVE in candidate.traits && Trait.DIVE in ally.traits ->
+            "Agree on one target and a countdown. Enter together, trade defensive attention, and leave on the same timing."
+        (Trait.SPEED in candidate.traits && (Trait.BRAWL in ally.traits || Trait.CLOSE_RANGE in ally.traits)) ||
+            (Trait.SPEED in ally.traits && (Trait.BRAWL in candidate.traits || Trait.CLOSE_RANGE in candidate.traits)) ->
+            "Use speed for the dangerous gap-closing moment, then stabilize on cover instead of continuing a blind chase."
+        (Trait.PROTECTION in candidate.traits && Trait.SNIPER in ally.traits) ||
+            (Trait.PROTECTION in ally.traits && Trait.SNIPER in candidate.traits) ->
+            "Create a protected sightline, pressure the same lane, and rotate the protection when enemies change angles."
+        (Trait.PEEL in candidate.traits && Trait.LONG_RANGE in ally.traits) ||
+            (Trait.PEEL in ally.traits && Trait.LONG_RANGE in candidate.traits) ->
+            "Stay close enough for immediate peel while preserving a crossfire; call flankers before they reach the backline."
+        (Trait.CLEANSE in candidate.traits && (Trait.DIVE in ally.traits || Trait.BRAWL in ally.traits)) ||
+            (Trait.CLEANSE in ally.traits && (Trait.DIVE in candidate.traits || Trait.BRAWL in candidate.traits)) ->
+            "Coordinate the aggressive entry with cleanse availability and disengage if that safety window is forced early."
+        else -> "Overlap pressure on the same target or lane, communicate key cooldowns, and avoid taking angles that break mutual support."
+    }
+
     private val specialCounterExplanations = mapOf(
         "kiriko|ana" to "Protection Suzu can cleanse anti-heal and interrupt Ana's sleep follow-up.",
         "kiriko|junker-queen" to "Protection Suzu cleanses wound pressure and can deny Rampage's anti-heal window.",
@@ -210,9 +444,14 @@ object RecommendationEngine {
         "sombra|wrecking-ball" to "Hack stops his movement and makes his predictable exit path easy to focus.",
         "reaper|winston" to "High close-range damage punishes Winston after he commits and lands inside the team.",
         "ana|roadhog" to "Biotic Grenade blocks self-healing while Sleep Dart punishes predictable hooks and Whole Hog.",
+        "lifeweaver|roadhog" to "Life Grip can pull hooked allies out of Roadhog's follow-up, while Petal Platform breaks his preferred close-range angle.",
         "brigitte|tracer" to "Shield, knockback and burst healing protect the backline and deny easy one-clips.",
         "brigitte|genji" to "Peel and close-range pressure make it difficult for Genji to finish isolated supports.",
         "zenyatta|mauga" to "Discord Orb amplifies team focus on his large hitbox and forces defensive resources sooner."
+    )
+
+    private val specialCounterPlayInstructions = mapOf(
+        "lifeweaver|roadhog" to "Hold Life Grip until Hook connects, pull the victim before Roadhog's follow-up, and place Petal where it lifts allies out of his effective range."
     )
 
     private val specialCounterExplanationsAr = mapOf(
@@ -314,15 +553,20 @@ object RecommendationEngine {
         return when {
             Trait.DIVE in candidate.traits && Trait.DIVE in ally.traits ->
                 "Both heroes can engage the same isolated target and disengage on a similar timing."
-            Trait.BRAWL in candidate.traits && (Trait.BRAWL in ally.traits || Trait.RUSH in ally.traits) ->
+            (Trait.BRAWL in candidate.traits && (Trait.BRAWL in ally.traits || Trait.RUSH in ally.traits)) ||
+                (Trait.BRAWL in ally.traits && (Trait.BRAWL in candidate.traits || Trait.RUSH in candidate.traits)) ->
                 "Their effective ranges overlap, so the team can commit together and trade resources efficiently."
-            Trait.POKE in candidate.traits && (Trait.POKE in ally.traits || Trait.SNIPER in ally.traits) ->
+            (Trait.POKE in candidate.traits && (Trait.POKE in ally.traits || Trait.SNIPER in ally.traits)) ||
+                (Trait.POKE in ally.traits && (Trait.POKE in candidate.traits || Trait.SNIPER in candidate.traits)) ->
                 "Combined long-range pressure controls sightlines and forces defensive cooldowns before the fight."
-            Trait.SPEED in candidate.traits && Trait.BRAWL in ally.traits ->
+            (Trait.SPEED in candidate.traits && Trait.BRAWL in ally.traits) ||
+                (Trait.SPEED in ally.traits && Trait.BRAWL in candidate.traits) ->
                 "Speed closes the gap and helps the brawl hero reach effective range without losing too many resources."
-            Trait.PROTECTION in candidate.traits && Trait.SNIPER in ally.traits ->
+            (Trait.PROTECTION in candidate.traits && Trait.SNIPER in ally.traits) ||
+                (Trait.PROTECTION in ally.traits && Trait.SNIPER in candidate.traits) ->
                 "Protection creates safer sightlines and more time for the sniper to take high-value shots."
-            Trait.PEEL in candidate.traits && (Trait.SNIPER in ally.traits || Trait.LONG_RANGE in ally.traits) ->
+            (Trait.PEEL in candidate.traits && (Trait.SNIPER in ally.traits || Trait.LONG_RANGE in ally.traits)) ||
+                (Trait.PEEL in ally.traits && (Trait.SNIPER in candidate.traits || Trait.LONG_RANGE in candidate.traits)) ->
                 "Peel protects the ally's angle and lets them keep pressure instead of abandoning position."
             else -> "Their ranges and utility complement each other, giving the team a clearer fight plan."
         }

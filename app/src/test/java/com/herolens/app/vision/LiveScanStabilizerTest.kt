@@ -31,17 +31,31 @@ class LiveScanStabilizerTest {
         assertFalse(snapshot.detections.any { it.heroId?.startsWith("wrong") == true })
     }
 
-    private fun frame(enemyPrefix: String = "enemy"): AutoDetectionResult {
+    @Test
+    fun stabilizesEverySupportedTwoTeamSize() {
+        for (teamSize in 3..6) {
+            val stabilizer = LiveScanStabilizer(windowSize = 3, minimumVotes = 2)
+            stabilizer.add(frame(teamSize = teamSize))
+            val snapshot = stabilizer.add(frame(teamSize = teamSize))
+
+            assertEquals(teamSize, snapshot.teamSize)
+            assertEquals(teamSize * 2, snapshot.stableSlots)
+            assertEquals(teamSize * 2, snapshot.detections.size)
+            assertTrue(snapshot.ready)
+        }
+    }
+
+    private fun frame(enemyPrefix: String = "enemy", teamSize: Int = 5): AutoDetectionResult {
         val detections = buildList {
-            repeat(5) { slot ->
+            repeat(teamSize) { slot ->
                 add(HeroDetection("ally$slot", TeamSide.ALLY, slot, 0.82f))
             }
-            repeat(5) { slot ->
+            repeat(teamSize) { slot ->
                 add(HeroDetection("$enemyPrefix$slot", TeamSide.ENEMY, slot, 0.82f))
             }
         }
         return AutoDetectionResult(
-            DetectionResult(detections, templatesLoaded = 52),
+            DetectionResult(detections, templatesLoaded = 52, teamSize = teamSize),
             ScoreboardLayout.PORTRAITS_LEFT,
             quality = 0.9f
         )

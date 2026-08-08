@@ -1,5 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
 <full-backup-content>
     <exclude domain="sharedpref" path="sensitive.xml" />
+    <exclude domain="sharedpref" path="herolens_v5.xml" />
+    <exclude domain="sharedpref" path="herolens_private_match_stats.xml" />
     <exclude domain="file" path="training_samples/" />
 </full-backup-content>

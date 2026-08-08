@@ -35,6 +35,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -60,6 +61,7 @@ import com.herolens.app.core.Hero
 import com.herolens.app.core.HeroCatalog
 import com.herolens.app.data.DatasetCollector
 import com.herolens.app.data.DisplayType
+import com.herolens.app.data.GameModeProfile
 import com.herolens.app.data.InputPlatform
 import com.herolens.app.vision.FrameQualityEvaluator
 import com.herolens.app.vision.HeroDetection
@@ -83,9 +85,17 @@ fun PictureScanScreen(
     collectTrainingData: Boolean,
     inputPlatform: InputPlatform,
     displayType: DisplayType,
+    gameModeProfile: GameModeProfile,
+    allowedHeroIds: Set<String>,
     preferredTeamSize: Int?,
     onClose: () -> Unit,
-    onUseDetections: (allies: List<String>, enemies: List<String>, currentHeroId: String?, confidence: Int) -> Unit
+    onUseDetections: (
+        allies: List<String>,
+        enemies: List<String>,
+        currentHeroId: String?,
+        confidence: Int,
+        teamSize: Int
+    ) -> Unit
 ) {
     val context = LocalContext.current
     val detector = remember { TemplateHeroDetector(context.applicationContext) }
@@ -98,12 +108,16 @@ fun PictureScanScreen(
     var region by remember { mutableStateOf<ScoreboardRegion?>(null) }
     var layout by remember { mutableStateOf(ScoreboardLayout.AUTO) }
     var detections by remember { mutableStateOf<List<HeroDetection>>(emptyList()) }
-    var teamSize by remember { mutableIntStateOf(5) }
+    var teamSize by remember(preferredTeamSize) { mutableIntStateOf(preferredTeamSize?.coerceIn(3, 6) ?: 5) }
     var correctionIndex by remember { mutableStateOf<Int?>(null) }
     var ownAllySlot by remember { mutableStateOf<Int?>(null) }
     var processing by remember { mutableStateOf(true) }
 
     BackHandler { onClose() }
+
+    DisposableEffect(detector) {
+        onDispose { detector.close() }
+    }
 
     LaunchedEffect(imageUri) {
         processing = true
@@ -111,6 +125,15 @@ fun PictureScanScreen(
         runCatching {
             val loaded = withContext(Dispatchers.IO) { loadPictureFrame(context, imageUri) }
             frame = loaded
+            if (gameModeProfile == GameModeProfile.STADIUM_DRAFT) {
+                // The live draft grid is a separate side-by-side visual domain.
+                // Never present standard scoreboard predictions as draft AI.
+                teamSize = 5
+                detections = manualDraftPlaceholders()
+                status = "Draft image ready for reviewed entry"
+                error = "Automatic draft-grid recognition is still gated on current real samples. Tap each revealed slot to label it; hidden picks can stay unknown."
+                return@runCatching
+            }
             val quality = FrameQualityEvaluator.evaluate(loaded)
             status = "Finding scoreboard…"
             val search = withContext(Dispatchers.Default) { ScoreboardLocator.search(loaded) }
@@ -131,8 +154,18 @@ fun PictureScanScreen(
                 append(" · ${quality.hint.name.lowercase().replace('_', ' ')}")
             }
         }.onFailure { throwable ->
-            error = throwable.message ?: "The picture could not be scanned"
-            status = "Picture scan failed"
+            if (gameModeProfile == GameModeProfile.STADIUM_DRAFT && frame != null) {
+                // A current Stadium draft grid is not the same geometry as the
+                // final scoreboard. Keep the image open and let the player label
+                // revealed picks instead of turning a detector miss into a dead end.
+                teamSize = 5
+                detections = manualDraftPlaceholders()
+                status = "Draft image ready for reviewed entry"
+                error = "Automatic draft-grid recognition is still gated on current real samples. Tap each revealed slot to label it; hidden picks can stay unknown."
+            } else {
+                error = throwable.message ?: "The picture could not be scanned"
+                status = "Picture scan failed"
+            }
         }
         processing = false
     }
@@ -141,13 +174,35 @@ fun PictureScanScreen(
         val alliesDetected = detections.filter { it.team == TeamSide.ALLY }.sortedBy { it.slot }
         val enemiesDetected = detections.filter { it.team == TeamSide.ENEMY }.sortedBy { it.slot }
         val currentHero = ownAllySlot?.let { slot -> alliesDetected.firstOrNull { it.slot == slot }?.heroId }
-        val allies = alliesDetected
+        val fullAllyHeroIds = alliesDetected.mapNotNull { it.heroId }
+        val allyHeroIds = alliesDetected
             .filterNot { ownAllySlot != null && it.slot == ownAllySlot }
             .mapNotNull { it.heroId }
-            .distinct()
-        val enemies = enemiesDetected.mapNotNull { it.heroId }.distinct()
-        if (enemies.size < 3) {
-            error = "Select at least three enemy heroes before using the result. Tap an empty slot to correct it."
+        val enemyHeroIds = enemiesDetected.mapNotNull { it.heroId }
+        val unavailable = (fullAllyHeroIds + enemyHeroIds).firstOrNull { it !in allowedHeroIds }
+        if (unavailable != null) {
+            val name = HeroCatalog.byId[unavailable]?.name ?: unavailable
+            error = "$name is banned or unavailable in this mode. Correct that slot before using the lineup."
+            return
+        }
+        if (fullAllyHeroIds.size != fullAllyHeroIds.distinct().size || enemyHeroIds.size != enemyHeroIds.distinct().size) {
+            error = "Duplicate heroes are not supported yet. Correct repeated same-team heroes before using this lineup."
+            return
+        }
+        val maximumAllies = (teamSize - 1).coerceAtLeast(0)
+        if (ownAllySlot == null && fullAllyHeroIds.size > maximumAllies) {
+            error = "Select MY ROW before importing a complete ally panel so HeroLens reserves your player slot."
+            return
+        }
+        val allies = allyHeroIds.take(maximumAllies)
+        val enemies = enemyHeroIds.take(teamSize)
+        if (gameModeProfile == GameModeProfile.STADIUM_DRAFT) {
+            if (allies.isEmpty() && enemies.isEmpty() && currentHero == null) {
+                error = "No revealed Stadium picks are ready yet. Correct at least one visible pick before importing."
+                return
+            }
+        } else if (enemies.size < teamSize || allies.size < maximumAllies) {
+            error = "Complete all $teamSize enemy slots and at least $maximumAllies ally slots before using this ${teamSize}v${teamSize} result."
             return
         }
         val confidence = detections.filter { it.heroId != null }
@@ -169,13 +224,16 @@ fun PictureScanScreen(
                         layout = layout,
                         platform = inputPlatform,
                         displayType = displayType,
-                        scanConfidence = confidence
+                        gameMode = gameModeProfile,
+                        teamSize = teamSize,
+                        scanConfidence = confidence,
+                        source = "picture_import"
                     )
                 }
-                onUseDetections(allies, enemies, currentHero, confidence)
+                onUseDetections(allies, enemies, currentHero, confidence, teamSize)
             }
         } else {
-            onUseDetections(allies, enemies, currentHero, confidence)
+            onUseDetections(allies, enemies, currentHero, confidence, teamSize)
         }
     }
 
@@ -269,6 +327,7 @@ fun PictureScanScreen(
         if (current != null) {
             PictureHeroPickerDialog(
                 selectedId = current.heroId,
+                allowedHeroIds = allowedHeroIds,
                 onSelected = { heroId ->
                     detections = detections.toMutableList().also { list ->
                         list[index] = current.copy(heroId = heroId, confidence = 1f)
@@ -279,6 +338,11 @@ fun PictureScanScreen(
             )
         }
     }
+}
+
+private fun manualDraftPlaceholders(): List<HeroDetection> = buildList {
+    repeat(5) { slot -> add(HeroDetection(null, TeamSide.ALLY, slot, 0f)) }
+    repeat(5) { slot -> add(HeroDetection(null, TeamSide.ENEMY, slot, 0f)) }
 }
 
 @Composable
@@ -357,12 +421,15 @@ private fun DetectionTeamCard(
 @Composable
 private fun PictureHeroPickerDialog(
     selectedId: String?,
+    allowedHeroIds: Set<String>,
     onSelected: (String?) -> Unit,
     onDismiss: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val heroes = remember(query) {
-        HeroCatalog.heroes.filter { it.name.contains(query, ignoreCase = true) || it.id.contains(query, ignoreCase = true) }
+    val heroes = remember(query, allowedHeroIds) {
+        HeroCatalog.heroes.filter {
+            it.id in allowedHeroIds && (it.name.contains(query, ignoreCase = true) || it.id.contains(query, ignoreCase = true))
+        }
     }
     Dialog(onDismissRequest = onDismiss) {
         Surface(shape = RoundedCornerShape(24.dp), modifier = Modifier.fillMaxWidth()) {

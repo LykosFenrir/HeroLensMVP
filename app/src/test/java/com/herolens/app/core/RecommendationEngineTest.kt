@@ -87,8 +87,41 @@ class RecommendationEngineTest {
             limit = HeroCatalog.heroes.size
         )
 
-        assertEquals(HeroCatalog.heroes.size, result.size)
+        assertEquals(HeroCatalog.heroes.size - 1, result.size)
+        assertTrue(result.none { it.hero.id == "mercy" })
         assertEquals(Role.entries.toSet(), result.map { it.hero.role }.toSet())
+    }
+
+    @Test
+    fun draftAvailabilityAndBansAreHardRecommendationConstraints() {
+        assertEquals(
+            setOf(
+                "ana", "ashe", "brigitte", "cassidy", "dva", "doomfist", "freja", "genji",
+                "hazard", "jetpack-cat", "junker-queen", "junkrat", "juno", "kiriko", "lucio",
+                "mei", "mercy", "moira", "orisa", "pharah", "ramattra", "reaper", "reinhardt",
+                "sigma", "sojourn", "soldier-76", "torbjorn", "tracer", "vendetta", "winston",
+                "wuyang", "zarya", "zenyatta"
+            ),
+            HeroCatalog.stadiumHeroIds
+        )
+        val result = RecommendationEngine.recommend(
+            MatchContext(
+                role = Role.DAMAGE,
+                mapProfile = MapProfile.MIXED,
+                allyIds = emptySet(),
+                enemyIds = emptySet(),
+                preferences = emptyMap(),
+                allRoles = true,
+                unavailableHeroIds = setOf("ana", "tracer"),
+                availableHeroIds = HeroCatalog.stadiumHeroIds
+            ),
+            limit = HeroCatalog.heroes.size
+        )
+
+        assertTrue(result.all { it.hero.id in HeroCatalog.stadiumHeroIds })
+        assertTrue(result.none { it.hero.id == "ana" || it.hero.id == "tracer" })
+        assertEquals(HeroCatalog.stadiumHeroIds.size - 2, result.size)
+        assertTrue(HeroCatalog.stadiumHeroIds.all { it in HeroCatalog.byId })
     }
 
 }

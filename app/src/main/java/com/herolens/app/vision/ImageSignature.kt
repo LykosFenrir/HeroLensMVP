@@ -55,7 +55,7 @@ object ScoreboardSlots {
         teamSize: Int
     ): List<List<Pair<TeamSide, NormalizedRect>>> {
         require(layout != ScoreboardLayout.AUTO)
-        require(teamSize in 5..6)
+        require(teamSize in 3..6)
 
         /*
          * The colour locator finds the blue/red tables, but the coloured area can

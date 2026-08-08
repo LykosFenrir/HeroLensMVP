@@ -95,6 +95,7 @@ import com.herolens.app.core.Hero
 import com.herolens.app.core.HeroCatalog
 import com.herolens.app.data.DatasetCollector
 import com.herolens.app.data.DisplayType
+import com.herolens.app.data.GameModeProfile
 import com.herolens.app.data.InputPlatform
 import com.herolens.app.data.ScanMode
 import com.herolens.app.vision.AutoDetectionResult
@@ -150,12 +151,15 @@ fun CameraScanScreen(
     collectTrainingData: Boolean,
     inputPlatform: InputPlatform,
     displayType: DisplayType,
+    gameModeProfile: GameModeProfile,
+    allowedHeroIds: Set<String>,
     onClose: () -> Unit,
     onUseDetections: (
         allies: List<String>,
         enemies: List<String>,
         currentHeroId: String?,
-        confidence: Int
+        confidence: Int,
+        teamSize: Int
     ) -> Unit
 ) {
     val context = LocalContext.current
@@ -169,6 +173,7 @@ fun CameraScanScreen(
     val scope = rememberCoroutineScope()
     val haptics = LocalHapticFeedback.current
     val detector = remember { TemplateHeroDetector(context.applicationContext) }
+    val initialTeamSize = preferredTeamSize?.coerceIn(3, 6) ?: 5
     val datasetCollector = remember { DatasetCollector(context.applicationContext) }
     val analyzerExecutor = remember { Executors.newSingleThreadExecutor() }
 
@@ -198,7 +203,7 @@ fun CameraScanScreen(
     var warning by remember { mutableStateOf<String?>(null) }
     var datasetMessage by remember { mutableStateOf<String?>(null) }
     var fatalError by remember { mutableStateOf<String?>(null) }
-    var detections by remember { mutableStateOf(placeholderDetections(5)) }
+    var detections by remember(initialTeamSize) { mutableStateOf(placeholderDetections(initialTeamSize)) }
     var selectedLayout by remember { mutableStateOf(preferredLayout) }
     var resolvedLayout by remember { mutableStateOf(preferredLayout) }
     var frameBrightness by remember { mutableStateOf(0f) }
@@ -222,7 +227,7 @@ fun CameraScanScreen(
     var locatorConfidence by remember { mutableStateOf(0f) }
     var frameDimensions by remember { mutableStateOf("—") }
     var overlaySlots by remember { mutableStateOf<List<Pair<TeamSide, NormalizedRect>>>(emptyList()) }
-    var detectedTeamSize by remember { mutableIntStateOf(5) }
+    var detectedTeamSize by remember(initialTeamSize) { mutableIntStateOf(initialTeamSize) }
     var capturedFrame by remember { mutableStateOf<ScoreboardFrame?>(null) }
     var capturedRegion by remember { mutableStateOf<ScoreboardRegion?>(null) }
     var hapticSent by remember { mutableStateOf(false) }
@@ -335,31 +340,50 @@ fun CameraScanScreen(
         stableSlots = 0
         readyToImport = false
         overlaySlots = emptyList()
-        detections = placeholderDetections(5)
-        detectedTeamSize = 5
+        detections = placeholderDetections(initialTeamSize)
+        detectedTeamSize = initialTeamSize
         status = "Aim at the blue and red scoreboard panels"
         warning = null
     }
 
-    fun useReviewedTeams(allowPartial: Boolean = false) {
+    fun useReviewedTeams() {
         val allyDetections = detections.filter { it.team == TeamSide.ALLY }.sortedBy { it.slot }
         val enemyDetections = detections.filter { it.team == TeamSide.ENEMY }.sortedBy { it.slot }
         val currentHero = ownAllySlot?.let { selected -> allyDetections.firstOrNull { it.slot == selected }?.heroId }
-        val allies = allyDetections
+        val fullAllyHeroIds = allyDetections.mapNotNull { it.heroId }
+        val allyHeroIds = allyDetections
             .filterNot { ownAllySlot != null && it.slot == ownAllySlot }
             .mapNotNull { it.heroId }
-            .distinct()
-            .take(if (ownAllySlot == null) detectedTeamSize else (detectedTeamSize - 1).coerceAtLeast(4))
-        val enemies = enemyDetections.mapNotNull { it.heroId }.distinct().take(detectedTeamSize)
-        val minimumEnemies = if (allowPartial) 3 else detectedTeamSize
-        val minimumAllies = if (allowPartial) 2 else detectedTeamSize - 1
-        if (enemies.size < minimumEnemies || allies.size < minimumAllies) {
-            warning = if (allowPartial) {
-                "Quick scan needs at least three enemies and two allies. Hold steady and scan again, or correct the empty slots."
-            } else {
-                "Correct the unknown slots before using the lineup. Your own ally row can remain optional."
-            }
+        val enemyHeroIds = enemyDetections.mapNotNull { it.heroId }
+        val unavailable = (fullAllyHeroIds + enemyHeroIds).firstOrNull { it !in allowedHeroIds }
+        if (unavailable != null) {
+            val name = HeroCatalog.byId[unavailable]?.name ?: unavailable
+            warning = "$name is banned or unavailable in this mode. Correct that slot before using the lineup."
             return
+        }
+        if (fullAllyHeroIds.size != fullAllyHeroIds.distinct().size || enemyHeroIds.size != enemyHeroIds.distinct().size) {
+            warning = "Duplicate heroes are not supported yet. Correct repeated same-team heroes before using this lineup."
+            return
+        }
+        val maximumAllies = (detectedTeamSize - 1).coerceAtLeast(0)
+        if (ownAllySlot == null && fullAllyHeroIds.size > maximumAllies) {
+            warning = "Select MY ROW before importing a complete ally panel so HeroLens reserves your player slot."
+            return
+        }
+        val allies = allyHeroIds.take(maximumAllies)
+        val enemies = enemyHeroIds.take(detectedTeamSize)
+        if (gameModeProfile == GameModeProfile.STADIUM_DRAFT) {
+            if (allies.isEmpty() && enemies.isEmpty() && currentHero == null) {
+                warning = "No revealed Stadium picks are ready yet. Correct at least one visible pick before importing."
+                return
+            }
+        } else {
+            val minimumEnemies = detectedTeamSize
+            val minimumAllies = maximumAllies
+            if (enemies.size < minimumEnemies || allies.size < minimumAllies) {
+                warning = "Correct the unknown slots before using the lineup. Your own ally row can remain optional."
+                return
+            }
         }
         val confidence = averageConfidence()
         if (collectTrainingData) {
@@ -376,16 +400,18 @@ fun CameraScanScreen(
                             layout = resolvedLayout,
                             platform = inputPlatform,
                             displayType = displayType,
+                            gameMode = gameModeProfile,
+                            teamSize = detectedTeamSize,
                             scanConfidence = confidence
                         )
                     }
                     datasetMessage = if (result.saved) "Reviewed sample saved locally for future training" else result.message
-                    onUseDetections(allies, enemies, currentHero, confidence)
+                    onUseDetections(allies, enemies, currentHero, confidence, detectedTeamSize)
                 }
                 return
             }
         }
-        onUseDetections(allies, enemies, currentHero, confidence)
+        onUseDetections(allies, enemies, currentHero, confidence, detectedTeamSize)
     }
 
     BackHandler(enabled = true) { closeScanner() }
@@ -411,20 +437,17 @@ fun CameraScanScreen(
         }
     }
 
-    LaunchedEffect(phase, readyToImport, quickResponse) {
+    DisposableEffect(detector) {
+        onDispose { detector.close() }
+    }
+
+    LaunchedEffect(phase, readyToImport, autoOpenResults) {
         phaseRef.set(phase)
-        if (phase == ScanPhase.REVIEW && autoOpenResults) {
-            val alliesKnown = detections.count { it.team == TeamSide.ALLY && it.heroId != null }
-            val enemiesKnown = detections.count { it.team == TeamSide.ENEMY && it.heroId != null }
-            if (quickResponse && enemiesKnown >= 3 && alliesKnown >= 2) {
-                delay(180)
-                useReviewedTeams(allowPartial = true)
-            } else if (readyToImport) {
-                val allHighConfidence = detections.filter { it.heroId != null }.all { it.confidence >= 0.72f }
-                if (allHighConfidence) {
-                    delay(650)
-                    useReviewedTeams()
-                }
+        if (phase == ScanPhase.REVIEW && autoOpenResults && readyToImport) {
+            val allHighConfidence = detections.filter { it.heroId != null }.all { it.confidence >= 0.72f }
+            if (allHighConfidence) {
+                delay(650)
+                useReviewedTeams()
             }
         }
     }
@@ -801,7 +824,7 @@ fun CameraScanScreen(
                     }
 
                     Text(
-                        "${scanMode.label} burst · brightness ${(frameBrightness * 100).roundToInt()}% · detail ${(frameSharpness * 1000).roundToInt()} · ${qualityHint.name.lowercase().replaceFirstChar(Char::uppercase)}",
+                        "${gameModeProfile.label} · ${scanMode.label} burst · brightness ${(frameBrightness * 100).roundToInt()}% · detail ${(frameSharpness * 1000).roundToInt()} · ${qualityHint.name.lowercase().replaceFirstChar(Char::uppercase)}",
                         color = Color.White.copy(alpha = 0.65f),
                         style = MaterialTheme.typography.labelSmall
                     )
@@ -875,6 +898,7 @@ fun CameraScanScreen(
         SingleHeroPickerDialog(
             selectedId = detections.getOrNull(index)?.heroId,
             suggested = detections.getOrNull(index)?.alternatives.orEmpty(),
+            allowedHeroIds = allowedHeroIds,
             onSelect = { heroId ->
                 detections = detections.mapIndexed { itemIndex, detection ->
                     if (itemIndex == index) detection.copy(heroId = heroId, confidence = 1f) else detection
@@ -979,11 +1003,14 @@ private fun LiveDetectionStrip(
 private fun SingleHeroPickerDialog(
     selectedId: String?,
     suggested: List<HeroCandidate>,
+    allowedHeroIds: Set<String>,
     onSelect: (String) -> Unit,
     onDismiss: () -> Unit
 ) {
     var query by remember { mutableStateOf("") }
-    val filtered = remember(query) { HeroCatalog.heroes.filter { it.name.contains(query, ignoreCase = true) } }
+    val filtered = remember(query, allowedHeroIds) {
+        HeroCatalog.heroes.filter { it.id in allowedHeroIds && it.name.contains(query, ignoreCase = true) }
+    }
     Dialog(onDismissRequest = onDismiss) {
         Surface(modifier = Modifier.fillMaxWidth().height(520.dp), shape = RoundedCornerShape(22.dp), tonalElevation = 6.dp) {
             Column(Modifier.padding(18.dp)) {
@@ -991,7 +1018,7 @@ private fun SingleHeroPickerDialog(
                 if (suggested.isNotEmpty()) {
                     Text("TOP MATCHES", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Black)
                     Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        suggested.take(3).forEach { candidate ->
+                        suggested.filter { it.heroId in allowedHeroIds }.take(3).forEach { candidate ->
                             val hero = HeroCatalog.byId[candidate.heroId] ?: return@forEach
                             FilterChip(
                                 selected = hero.id == selectedId,

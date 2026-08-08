@@ -1,7 +1,17 @@
 package com.herolens.app.core
 
 object HeroCatalog {
-    const val DATA_VERSION = "2026-07-live-14-v2"
+    const val DATA_VERSION = "2026-08-live-07-v3"
+    const val STADIUM_DATA_VERSION = "2026-08-07-official"
+
+    /** Current official Stadium roster; kept separate because Stadium rotates heroes. */
+    val stadiumHeroIds: Set<String> = setOf(
+        "ana", "ashe", "brigitte", "cassidy", "dva", "doomfist", "freja", "genji",
+        "hazard", "jetpack-cat", "junker-queen", "junkrat", "juno", "kiriko", "lucio",
+        "mei", "mercy", "moira", "orisa", "pharah", "ramattra", "reaper", "reinhardt",
+        "sigma", "sojourn", "soldier-76", "torbjorn", "tracer", "vendetta", "winston",
+        "wuyang", "zarya", "zenyatta"
+    )
 
     val heroes: List<Hero> = listOf(
         Hero("dva", "D.Va", Role.TANK, setOf(Trait.DIVE, Trait.MOBILITY, Trait.VERTICALITY, Trait.PEEL, Trait.ANTI_AIR)),
