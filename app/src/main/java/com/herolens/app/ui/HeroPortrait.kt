@@ -4,6 +4,7 @@ import android.content.Context
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.util.LruCache
+import com.herolens.app.BuildConfig
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
@@ -64,7 +65,7 @@ private object PortraitLoader {
         connection.connectTimeout = 10_000
         connection.readTimeout = 18_000
         connection.instanceFollowRedirects = true
-        connection.setRequestProperty("User-Agent", "HeroLens/0.6")
+        connection.setRequestProperty("User-Agent", "HeroLens/${BuildConfig.VERSION_NAME}")
         return try {
             connection.inputStream.use { input ->
                 destination.outputStream().use { output -> input.copyTo(output) }

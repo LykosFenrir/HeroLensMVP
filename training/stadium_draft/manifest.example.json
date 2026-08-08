@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "datasetId": "stadium-draft-private-v1",
+  "samples": [
+    {
+      "id": "match-001-reveal-03",
+      "path": "local/match-001-reveal-03.png",
+      "split": "train",
+      "sessionId": "match-001",
+      "deviceId": "console-tv-phone-a",
+      "source": "user-capture",
+      "sourceUrl": null,
+      "license": "user-consented-private-training",
+      "trainingAllowed": true,
+      "privacy": "game-ui-crop-only",
+      "mode": "STADIUM_DRAFT",
+      "uiRevision": "blind-pick-2025-11+",
+      "patch": "2026-07-28",
+      "platform": "CONSOLE",
+      "language": "en-US",
+      "resolution": [1920, 1080],
+      "coordinateFormat": "normalized-xywh",
+      "teamSize": 5,
+      "phase": "partial-reveal",
+      "slots": [
+        { "team": "ally", "slot": 0, "state": "locked", "heroId": "ana", "box": [0.02, 0.12, 0.17, 0.12], "portraitBox": [0.02, 0.12, 0.06, 0.12] },
+        { "team": "ally", "slot": 1, "state": "pending", "heroId": null, "box": [0.02, 0.25, 0.17, 0.12], "portraitBox": null },
+        { "team": "enemy", "slot": 0, "state": "locked", "heroId": "winston", "box": [0.81, 0.12, 0.17, 0.12], "portraitBox": [0.92, 0.12, 0.06, 0.12] }
+      ],
+      "ignore": [
+        { "kind": "roster-grid", "box": [0.18, 0.68, 0.64, 0.30] },
+        { "kind": "player-name", "box": [0.02, 0.12, 0.10, 0.03] }
+      ]
+    }
+  ]
+}

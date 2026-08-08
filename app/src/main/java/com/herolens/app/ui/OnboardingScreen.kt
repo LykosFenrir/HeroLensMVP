@@ -49,6 +49,12 @@ fun OnboardingScreen(onFinish: () -> Unit) {
     val pages = remember {
         listOf(
             IntroPage(
+                symbol = "HL",
+                eyebrow = "MOBILE MATCH COMPANION",
+                title = "Plan, coach, improve",
+                body = "Use HeroLens before a match for draft and matchup advice, during play for a glanceable fight plan, and afterward to review saved coaching sessions."
+            ),
+            IntroPage(
                 symbol = "⌗",
                 eyebrow = "THREE SCAN MODES",
                 title = "Fast, stable or manual",
@@ -65,6 +71,12 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                 eyebrow = "EXPLAINABLE & PRIVATE",
                 title = "Know why the pick works",
                 body = "Recommendations explain counters and synergy. Nothing is uploaded automatically; optional reviewed training crops remain under your control."
+            ),
+            IntroPage(
+                symbol = "C",
+                eyebrow = "HERO INTELLIGENCE",
+                title = "Learn every hero",
+                body = "Search all 52 heroes for practical play plans, curated and inferred matchups, threats, synergies, and exact coordination advice."
             )
         )
     }
@@ -87,7 +99,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                 .padding(24.dp)
         ) {
             Text(
-                "HEROLENS V8",
+                "HEROLENS V11",
                 modifier = Modifier.align(Alignment.TopStart),
                 style = MaterialTheme.typography.labelLarge,
                 fontWeight = FontWeight.Black
@@ -143,7 +155,7 @@ fun OnboardingScreen(onFinish: () -> Unit) {
                     modifier = Modifier.fillMaxWidth().height(56.dp),
                     shape = RoundedCornerShape(18.dp)
                 ) {
-                    Text(if (page == pages.lastIndex) "START SCANNING" else "NEXT", fontWeight = FontWeight.Black)
+                    Text(if (page == pages.lastIndex) "OPEN HEROLENS" else "NEXT", fontWeight = FontWeight.Black)
                 }
                 if (page < pages.lastIndex) {
                     OutlinedButton(onClick = onFinish, modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp)) {

@@ -55,7 +55,9 @@ data class MatchContext(
     val ultimateCharge: Int = 0,
     val rank: String = "UNRANKED",
     val inputPlatform: String = "PC",
-    val allRoles: Boolean = false
+    val allRoles: Boolean = false,
+    val unavailableHeroIds: Set<String> = emptySet(),
+    val availableHeroIds: Set<String>? = null
 )
 
 sealed interface Reason {

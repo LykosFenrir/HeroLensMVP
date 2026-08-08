@@ -4,6 +4,7 @@ import android.content.Context
 import android.content.Intent
 import android.graphics.Bitmap
 import androidx.core.content.FileProvider
+import com.herolens.app.BuildConfig
 import com.herolens.app.vision.HeroDetection
 import com.herolens.app.vision.NormalizedRect
 import com.herolens.app.vision.ScoreboardFrame
@@ -43,6 +44,8 @@ class DatasetCollector(private val context: Context) {
         layout: ScoreboardLayout,
         platform: InputPlatform,
         displayType: DisplayType,
+        gameMode: GameModeProfile,
+        teamSize: Int,
         scanConfidence: Int,
         source: String = "scan_burst"
     ): DatasetSaveResult {
@@ -78,13 +81,15 @@ class DatasetCollector(private val context: Context) {
             }
 
             val metadata = JSONObject()
-                .put("schema", 1)
-                .put("appVersion", "0.8.0")
+                .put("schema", 2)
+                .put("appVersion", BuildConfig.VERSION_NAME)
                 .put("timestamp", timestamp)
                 .put("source", source)
                 .put("platform", platform.name)
                 .put("displayType", displayType.name)
+                .put("gameMode", gameMode.name)
                 .put("layout", layout.name)
+                .put("teamSize", teamSize.coerceIn(3, 6))
                 .put("scanConfidence", scanConfidence)
                 .put("frameWidth", frame.width)
                 .put("frameHeight", frame.height)

@@ -1,0 +1,23 @@
+{
+  "model": "tiny-anchor-free-scoreboard-detector",
+  "detected_object": "scoreboard-portrait",
+  "train_scenes": 1200,
+  "validation_scenes": 240,
+  "synthetic_mean_iou": 0.75423,
+  "synthetic_detection_recall": 0.975718,
+  "synthetic_detection_precision": 0.913604,
+  "input_shape": [
+    "N",
+    3,
+    192,
+    320
+  ],
+  "output_shape": [
+    "N",
+    24,
+    5
+  ],
+  "elapsed_seconds": 435.82,
+  "seed": 20260801,
+  "real_full_scoreboard_gate": "pending-reviewed-dataset"
+}

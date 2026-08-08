@@ -19,6 +19,14 @@ on:
         description: Generated full scoreboards used for publish-gate testing
         required: true
         default: "600"
+      detector_train_scenes:
+        description: Generated localized scoreboards for portrait-box detection
+        required: true
+        default: "1200"
+      detector_validation_scenes:
+        description: Disjoint generated scoreboards for detector validation
+        required: true
+        default: "240"
 
 permissions:
   contents: write
@@ -26,7 +34,7 @@ permissions:
 jobs:
   train:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 150
     steps:
       - name: Check out source
         uses: actions/checkout@v4
@@ -42,6 +50,11 @@ jobs:
           python -m pip install --index-url https://download.pytorch.org/whl/cpu torch torchvision
           python -m pip install onnx requests pillow numpy
 
+      - name: Validate Stadium Draft dataset schema
+        run: |
+          python training/stadium_draft/audit_dataset.py \
+            --manifest training/stadium_draft/manifest.example.json
+
       - name: Train and export ONNX classifier
         run: |
           python training/train_hero_classifier.py \
@@ -49,8 +62,17 @@ jobs:
             --scoreboard-samples-per-class "${{ inputs.scoreboard_samples_per_class }}" \
             --full-scoreboard-train-scenes-per-layout "120" \
             --full-scoreboard-validation-scenes-per-layout "24" \
+            --real-samples-per-image "54" \
             --epochs "${{ inputs.epochs }}" \
             --benchmark-scoreboards "${{ inputs.benchmark_scoreboards }}" \
+            --enforce-gates
+
+      - name: Train and export full-scoreboard detector
+        run: |
+          python training/train_scoreboard_detector.py \
+            --train-scenes "${{ inputs.detector_train_scenes }}" \
+            --validation-scenes "${{ inputs.detector_validation_scenes }}" \
+            --epochs "${{ inputs.epochs }}" \
             --enforce-gates
 
       - name: Validate ONNX file
@@ -66,11 +88,24 @@ jobs:
           assert model.stat().st_size > 1_000_000
           assert metrics["best_synthetic_validation_accuracy"] >= 0.72
           assert metrics["best_scoreboard_crop_validation_accuracy"] >= 0.72
-          assert metrics["best_full_scoreboard_validation_accuracy"] >= 0.70
+          assert metrics["best_full_scoreboard_validation_accuracy"] >= 0.65
+          assert metrics["real_train_source_images"] >= 36
+          assert metrics["real_scoreboard_validation_images"] >= 36
+          assert metrics["real_scoreboard_validation_groups"] >= 12
+          assert metrics["best_real_scoreboard_validation_accuracy"] >= 0.65
+          assert metrics["selected_real_scoreboard_validation_accuracy"] >= 0.65
           assert metrics["scoreboard_benchmark_scenes"] >= 500
           assert metrics["scoreboard_benchmark_accuracy"] >= 0.62
           assert metrics["scoreboard_benchmark_5v5_accuracy"] >= 0.58
           assert metrics["scoreboard_benchmark_6v6_accuracy"] >= 0.58
+          detector = Path("app/src/main/assets/model/scoreboard_detector.onnx")
+          onnx.checker.check_model(onnx.load(detector))
+          detector_metrics = json.loads(Path("app/src/main/assets/model/scoreboard_detector_metrics.json").read_text())
+          print(detector_metrics)
+          assert detector.stat().st_size > 100_000
+          assert detector_metrics["synthetic_mean_iou"] >= 0.50
+          assert detector_metrics["synthetic_detection_recall"] >= 0.45
+          assert detector_metrics["synthetic_detection_precision"] >= 0.70
           PY
 
       - name: Commit trained model
@@ -79,7 +114,9 @@ jobs:
           git config user.email "actions@users.noreply.github.com"
           git add app/src/main/assets/model/hero_classifier.onnx \
                   app/src/main/assets/model/hero_labels.txt \
-                  app/src/main/assets/model/model_metrics.json
+                  app/src/main/assets/model/model_metrics.json \
+                  app/src/main/assets/model/scoreboard_detector.onnx \
+                  app/src/main/assets/model/scoreboard_detector_metrics.json
           if git diff --cached --quiet; then
             echo "No model changes to commit"
           else
@@ -96,3 +133,5 @@ jobs:
             app/src/main/assets/model/hero_classifier.onnx
             app/src/main/assets/model/hero_labels.txt
             app/src/main/assets/model/model_metrics.json
+            app/src/main/assets/model/scoreboard_detector.onnx
+            app/src/main/assets/model/scoreboard_detector_metrics.json

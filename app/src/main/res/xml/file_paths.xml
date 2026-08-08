@@ -2,4 +2,5 @@
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
     <cache-path name="dataset_exports" path="dataset_exports/" />
     <cache-path name="picture_scan" path="picture_scan/" />
+    <cache-path name="post_match_capture" path="post_match_capture/" />
 </paths>
